@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
                     console.print(f"  directing {done}/{total}")
 
             direct(sentences, doc.title, cfg, on_progress=report)
-    else:
+    elif not args.cast_review:
         direct(sentences, doc.title, DirectorConfig(enabled=False))
 
     # ------------------------------------------------------------------ cast
@@ -178,8 +178,12 @@ def main(argv: list[str] | None = None) -> int:
             available = set(probe.voices())
             narrator_voice = getattr(probe, "voice", "")
             probe.close()
-            cast_obj = assign_voices(roster, narrator_voice, available)
-            pov_voices = {c.name.upper(): narrator_voice
+            pov_order: list[str] = []
+            for x in sentences:
+                if x.pov and x.pov not in pov_order:
+                    pov_order.append(x.pov)
+            cast_obj = assign_voices(roster, narrator_voice, available, pov_order)
+            pov_voices = {c.name.upper(): (c.voice or narrator_voice)
                           for c in roster.values() if c.is_narrator}
             if args.cast_file and args.cast_file.exists():
                 import tomllib
@@ -193,6 +197,12 @@ def main(argv: list[str] | None = None) -> int:
                         from .cast import Character
                         cast_obj.characters[key] = Character(name=name)
                     cast_obj.characters[key].voice = voice
+                flat = conf.get("flat") or []
+                if isinstance(flat, list):
+                    cast_obj.flat = {str(x).upper() for x in flat}
+                    if cast_obj.flat:
+                        console.print("  [dim]read flat (no emotional "
+                                      f"colour): {', '.join(sorted(cast_obj.flat))}[/]")
                 changed, warnings = apply_overrides(sentences, conf,
                                                     cast_obj.characters)
                 if changed:

@@ -17,15 +17,22 @@ is invisible and mis-casting is jarring.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import urllib.request
+from pathlib import Path
 from dataclasses import dataclass, field
 
 from .director import OLLAMA_URL, DirectorConfig, _api, _claude_cli
 from .document import Sentence
 
 NARRATOR = "NARRATOR"
+
+# Attribution is as expensive as direction and just as reusable, so it is
+# cached the same way: keyed by the batch text, the roster and the model.
+ATTRIB_CACHE = Path.home() / ".cache" / "narrator" / "attribution"
+ATTRIB_VERSION = "1"
 
 # Distinct, long-form-friendly voices, ordered so the first picks are the most
 # different from one another.
@@ -99,19 +106,48 @@ class Character:
     age: str = "adult"
     is_narrator: bool = False
     voice: str = ""
+    flat: bool = False
 
 
 @dataclass
 class Cast:
     characters: dict[str, Character] = field(default_factory=dict)
     narrator_voice: str = ""
+    # Speakers whose lines are never coloured. A machine narrator that gets
+    # the same emotional shaping as a person stops reading as a machine, so
+    # this switches the style offsets off entirely for them.
+    flat: set[str] = field(default_factory=set)
+
+    def is_flat(self, sentence: Sentence) -> bool:
+        who = self.resolve(sentence.speaker or "")
+        if who and who in self.flat:
+            return True
+        # narration inside a flat narrator's section is flat too
+        return bool(sentence.pov) and sentence.pov.upper() in self.flat
+
+    def resolve(self, who: str) -> str:
+        """Map a speaker name to a cast key, tolerating how names vary.
+
+        A model will call the same person Yael, Yael Gur and YAEL GUR within
+        one book. Left alone each becomes a separate character with its own
+        voice, so one person would change voice mid-scene.
+        """
+        key = (who or "").strip().upper()
+        if not key or key in self.characters:
+            return key
+        parts = key.split()
+        for cand in self.characters:
+            cparts = cand.split()
+            if parts[0] == cparts[0] or (len(parts) > 1 and parts[-1] == cparts[-1]):
+                return cand
+        return key
 
     def voice_for(self, sentence: Sentence) -> str:
         """The voice this line should be read in, or "" for the narrator."""
         who = sentence.speaker
-        if not who or who in (NARRATOR, "UNKNOWN"):
+        if not who or who.upper() in (NARRATOR, "UNKNOWN"):
             return ""
-        c = self.characters.get(who.upper())
+        c = self.characters.get(self.resolve(who))
         return c.voice if c and c.voice else ""
 
     def summary(self) -> list[str]:
@@ -230,6 +266,7 @@ def attribute(sentences: list[Sentence], roster: dict[str, Character],
         return
     names = ", ".join(c.name for c in roster.values()) or "(unknown)"
 
+    ATTRIB_CACHE.mkdir(parents=True, exist_ok=True)
     window, context = 26, 6
     done = 0
     for start in range(0, len(sentences), window):
@@ -245,7 +282,28 @@ def attribute(sentences: list[Sentence], roster: dict[str, Character],
         want = [s.index for s in batch if s.role == "speech"]
         user = (f"Novel: {title}\nRoster: {names}\n\n{lines}\n\n"
                 f"Attribute every one of these speech lines: {want}")
-        for row in _ask(ATTRIB_SYSTEM, user, cfg, ATTRIB_SCHEMA):
+
+        h = hashlib.sha256()
+        h.update(ATTRIB_VERSION.encode())
+        h.update(cfg.model.encode())
+        h.update(names.encode())
+        h.update(user.encode())
+        cache_file = ATTRIB_CACHE / f"{h.hexdigest()[:24]}.json"
+        rows: list[dict] = []
+        if cache_file.exists():
+            try:
+                rows = json.loads(cache_file.read_text())
+            except json.JSONDecodeError:
+                rows = []
+        if not rows:
+            rows = _ask(ATTRIB_SYSTEM, user, cfg, ATTRIB_SCHEMA)
+            if rows:
+                try:
+                    cache_file.write_text(json.dumps(rows))
+                except OSError:
+                    pass
+
+        for row in rows:
             try:
                 idx = int(row.get("i", -1))
             except (TypeError, ValueError):
@@ -259,34 +317,63 @@ def attribute(sentences: list[Sentence], roster: dict[str, Character],
 
 
 def assign_voices(roster: dict[str, Character], narrator_voice: str,
-                  available: set[str]) -> Cast:
-    """Give every speaking character a stable voice, never the narrator's."""
-    male = [v for v in MALE_POOL if v in available and v != narrator_voice]
-    female = [v for v in FEMALE_POOL if v in available and v != narrator_voice]
-    other = [v for v in (MALE_POOL + FEMALE_POOL)
-             if v in available and v != narrator_voice]
+                  available: set[str], pov_order: list[str] | None = None) -> Cast:
+    """Give every speaker a stable voice, and every POV narrator their own.
+
+    A book that changes narrator needs a different voice per point of view,
+    or the switch is inaudible and the device is lost. The first narrator
+    encountered keeps the voice the reader asked for; the rest are cast from
+    the pools by gender.
+    """
+    taken = {narrator_voice}
+
+    def take(gender: str) -> str:
+        pools = ([MALE_POOL] if gender == "male"
+                 else [FEMALE_POOL] if gender == "female"
+                 else [MALE_POOL, FEMALE_POOL])
+        for pool in pools:
+            for v in pool:
+                if v in available and v not in taken:
+                    taken.add(v)
+                    return v
+        return ""
+
+    # Narrators first, in the order they appear, so the primary POV keeps the
+    # requested voice.
+    order = pov_order or []
+    narrators = [c for c in roster.values() if c.is_narrator]
+    narrators.sort(key=lambda c: order.index(c.name.upper())
+                   if c.name.upper() in order else len(order))
+    for i, c in enumerate(narrators):
+        c.voice = narrator_voice if i == 0 else take(c.gender)
 
     for c in sorted(roster.values(), key=lambda c: c.name):
-        if c.is_narrator:
-            continue                      # narrators read in the POV voice
-        pool = male if c.gender == "male" else female if c.gender == "female" else other
-        if pool:
-            c.voice = pool.pop(0)
-            for p in (male, female, other):
-                if c.voice in p:
-                    p.remove(c.voice)
+        if not c.is_narrator:
+            c.voice = take(c.gender)
     return Cast(characters=roster, narrator_voice=narrator_voice)
 
 
 def track_pov(sentences: list[Sentence], roster: dict[str, Character]) -> None:
-    """Carry the point-of-view name forward from scene headers."""
-    narrators = {c.name.upper() for c in roster.values() if c.is_narrator}
+    """Carry the point-of-view name forward from scene headers.
+
+    The headers themselves are the authority, not the roster: a book that
+    marks its sections MIRA / SENTINEL / JACK is telling us who narrates, and
+    that signal is far more reliable than asking a model to work it out. Any
+    all-capital name at the head of a section is taken as a POV marker, and
+    registered as a narrator if the roster missed them - which it will, since
+    a narrator who never speaks aloud looks like nobody at all.
+    """
     current = ""
     for s in sentences:
         if s.kind in ("heading", "chapter", "title"):
-            head = re.match(r"^([A-Za-z][\w'\-]*)", s.text.strip())
-            if head and head.group(1).upper() in narrators:
-                current = head.group(1).upper()
+            head = re.match(r"^([A-Z][A-Z'\-]{1,})\b", s.text.strip())
+            if head:
+                name = head.group(1).upper()
+                current = name
+                if name not in roster:
+                    roster[name] = Character(name=name, is_narrator=True)
+                else:
+                    roster[name].is_narrator = True
         s.pov = current
 
 
@@ -303,27 +390,49 @@ def apply_overrides(sentences: list[Sentence], conf: dict,
     """Apply a reviewed cast file. Returns (lines changed, warnings).
 
     Line overrides are keyed by the spoken text rather than by index, because
-    an index moves the moment a sentence is added anywhere earlier in the
-    book and would then silently reassign the wrong line.
+    an index moves the moment a sentence is added anywhere earlier in the book
+    and would then silently reassign the wrong line.
+
+    A short line recurs -- "Okay.", "I don't know." -- and the speakers differ.
+    Suffix a key with #N to address the Nth occurrence:
+
+        "Okay." = "SARA"        # every occurrence
+        "Okay.#2" = "JACK"      # only the second
+
+    A bare key applies to occurrences no numbered key claims.
     """
     changed = 0
     warnings: list[str] = []
 
     lines = conf.get("lines") or {}
-    wanted = {_line_key(k): v for k, v in lines.items()}
+    general: dict[str, str] = {}
+    numbered: dict[tuple[str, int], str] = {}
+    for raw, who in lines.items():
+        m = re.match(r"^(.*)#(\d+)$", str(raw).strip())
+        if m:
+            numbered[(_line_key(m.group(1)), int(m.group(2)))] = who
+        else:
+            general[_line_key(raw)] = who
+
+    wanted = dict(general)
     seen: set[str] = set()
+    occurrence: dict[str, int] = {}
     for s in sentences:
         if s.role != "speech":
             continue
         key = _line_key(s.text)
-        if key in wanted:
+        n = occurrence[key] = occurrence.get(key, 0) + 1
+        who = numbered.get((key, n), general.get(key))
+        if who is not None:
             seen.add(key)
-            if s.speaker != wanted[key]:
-                s.speaker = wanted[key]
+            if (key, n) in numbered:
+                seen.add(f"{key}#{n}")
+            if s.speaker != who:
+                s.speaker = who
                 changed += 1
-    for key, who in wanted.items():
+    for key in list(general) + [f"{k}#{n}" for k, n in numbered]:
         if key not in seen:
-            warnings.append(f'no spoken line matches "{key}" (assigned {who})')
+            warnings.append(f'no spoken line matches "{key}"')
     return changed, warnings
 
 

@@ -289,10 +289,12 @@ _TAG = re.compile(
 #   ...and said: "Tell me."          -> Sara speaks
 #   ...the market would "reallocate" -> the narrator is quoting a phrase
 _INTRODUCES_SPEECH = re.compile(
-    r"\b(?:said|says|asked|asks|replied|answered|whispered|shouted|muttered|"
-    r"added|continued|repeated|offered|admitted|snapped|called|told|breathed|"
-    r"echoed|murmured|insisted|observed|noted|began|read|wrote|announced)\b"
-    r"[\s:,\u2014-]*$", re.I)
+    r"\b(?:said|say|says|saying|asked|asks|replied|answered|whispered|shouted|"
+    r"muttered|added|continued|repeated|offered|admitted|snapped|called|told|"
+    r"breathed|echoed|murmured|insisted|observed|noted|began|read|wrote|"
+    r"announced)\b[\s:,\u2014-]*$"
+    # A bare colon introduces speech too: `She nodded. Then: "..."`.
+    r"|:\s*$", re.I)
 
 
 def _looks_like_tag(fragment: str) -> bool:
@@ -300,6 +302,33 @@ def _looks_like_tag(fragment: str) -> bool:
     if not f or len(f.split()) > 6:
         return False
     return bool(_TAG.match(f))
+
+
+# Some books mark dialogue with a colon instead of quotes:
+#   He said: Are you on a secure line? I said: I'm in my kitchen.
+# The colon is doing the job quotation marks do elsewhere, so the same
+# speech-verb test applies. Kept deliberately narrow -- only these verbs, only
+# when a capital letter follows -- because a false positive puts narration
+# into a character's voice, which is the one failure that is really audible.
+_COLON_SPEECH = re.compile(
+    r"\b(said|says|asked|asks|replied|answered|whispered|shouted|muttered|"
+    r"added|continued|repeated|told|called)\s*:\s+(?=[A-Z])", re.I)
+
+
+def split_colon_dialogue(text: str) -> list[tuple[str, str]] | None:
+    """Split `He said: <line>` into narration and speech, or None."""
+    m = _COLON_SPEECH.search(text)
+    if not m:
+        return None
+    lead = text[:m.end()].strip()
+    spoken = text[m.end():].strip()
+    if not spoken or len(spoken.split()) < 2:
+        return None
+    out: list[tuple[str, str]] = []
+    if lead:
+        out.append(("narration", lead))
+    out.append(("speech", spoken))
+    return out
 
 
 def split_dialogue(text: str, carry_open: bool) -> tuple[list[tuple[str, str]], bool]:
@@ -318,7 +347,8 @@ def split_dialogue(text: str, carry_open: bool) -> tuple[list[tuple[str, str]], 
     stripped = text.lstrip()
     opens_here = bool(stripped) and stripped[0] in _QUOTES
     if not carry_open and _QUOTES_RE.search(text) is None:
-        return [("narration", text)], False
+        colon = split_colon_dialogue(text)
+        return (colon or [("narration", text)]), False
 
     # Break into alternating spans on the quote toggle.
     spans: list[tuple[bool, str]] = []
@@ -335,6 +365,7 @@ def split_dialogue(text: str, carry_open: bool) -> tuple[list[tuple[str, str]], 
 
     out: list[tuple[str, str]] = []
     preceding = ""
+    last_quoted_speech = False
     for i, (in_quote, body) in enumerate(spans):
         chunk = body.strip()
         if not chunk:
@@ -348,8 +379,21 @@ def split_dialogue(text: str, carry_open: bool) -> tuple[list[tuple[str, str]], 
             preceding = body
             continue
         # a quoted span: speech, or the narrator quoting a phrase?
-        is_speech = (carry_open and i == 0) or (opens_here and i == 1) \
+        #   "They let me go today."          -> speech, nothing follows
+        #   "You're not here," she said.     -> speech, a tag follows
+        #   "Sabbatical" is academia's ...   -> a quoted term, not a line
+        trailing = " ".join(b for j, (q, b) in enumerate(spans)
+                            if j > i and not q).strip()
+        opener_ok = opens_here and i == 1 and (
+            not trailing or _looks_like_tag(trailing))
+        # Two turns can share one sentence when the first ends on a dash
+        # rather than a full stop: `"Why not someone who-" "There isn't
+        # anyone else."` Nothing separates them but space, so the second
+        # inherits the first's role.
+        follows_turn = last_quoted_speech and not preceding.strip()
+        is_speech = (carry_open and i == 0) or opener_ok or follows_turn \
             or bool(_INTRODUCES_SPEECH.search(preceding))
+        last_quoted_speech = is_speech
         out.append(("speech" if is_speech else "narration", chunk))
         preceding = ""
 
@@ -365,14 +409,15 @@ def split_dialogue(text: str, carry_open: bool) -> tuple[list[tuple[str, str]], 
     return (merged or [("narration", text)]), inside
 
 
-def _emit(sentences: list[Sentence], pieces: list[str], block: Block) -> None:
+def _emit(sentences: list[Sentence], pieces: list[str], block: Block,
+          carry: bool = False) -> bool:
     """Turn split sentences into Sentences, with dividers and dialogue handled.
 
     Both the ordinary path and the scene-header path go through here; when
     they did not, every line of dialogue in a block that opened with a POV
     header was silently read by the narrator.
     """
-    open_quote = False
+    open_quote = carry
     for piece in pieces:
         # a divider can also land mid-block, when the PDF text layer ran the
         # break line into the surrounding paragraph
@@ -384,11 +429,15 @@ def _emit(sentences: list[Sentence], pieces: list[str], block: Block) -> None:
         parts, open_quote = split_dialogue(piece, open_quote)
         for role, part in parts:
             sentences.append(Sentence(part, block.index, block.kind, role=role))
+    return open_quote
 
 
 def segment(doc: Document, *, read_code: bool = False) -> list[Sentence]:
     """Document -> flat list of Sentences, normalised and ready to direct."""
     sentences: list[Sentence] = []
+    # A speech turn can be split across paragraphs by the PDF text layer, so
+    # the open-quote state carries between them; a heading ends any turn.
+    carry = False
     for b in doc.blocks:
         if b.kind == "code":
             if not read_code:
@@ -407,13 +456,14 @@ def segment(doc: Document, *, read_code: bool = False) -> list[Sentence]:
             continue
 
         if b.is_heading:
+            carry = False
             sentences.append(Sentence(body, b.index, b.kind))
         elif (header := split_scene_header(b.text))[0]:
             head, rest = header
             sentences.append(Sentence(normalise(head), b.index, "heading"))
-            _emit(sentences, split_sentences(normalise(rest)), b)
+            carry = _emit(sentences, split_sentences(normalise(rest)), b, carry)
         else:
-            _emit(sentences, split_sentences(body), b)
+            carry = _emit(sentences, split_sentences(body), b, carry)
 
     for i, s in enumerate(sentences):
         s.index = i

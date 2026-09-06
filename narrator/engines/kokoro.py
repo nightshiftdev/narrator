@@ -218,6 +218,9 @@ class KokoroEngine(Engine):
         base_voice = self._base_voice(sentence)
         if self._pitch_axis is None:
             return base_voice
+        if self.cast is not None and self.cast.is_flat(sentence):
+            # affectless by instruction: no emotion, no lift, no heading colour
+            return base_voice
         pitch, anim = EMOTION_STYLE.get(sentence.emotion, (0.0, 0.0))
         cast_voiced = base_voice != self.voice
         if sentence.role == "speech" and not cast_voiced:
