@@ -71,6 +71,23 @@ Rules:
   speaking aloud.
 - Two consecutive speech lines are usually different speakers taking turns,
   but not always: one person can say several sentences in a row.
+- The narration around a line is the strongest clue, and it usually refers to
+  the speaker by pronoun rather than by name. If the lines just before and
+  after a spoken line describe "she" doing something, that line is almost
+  certainly hers, even when the previous speaker was someone else:
+
+      "They let me go today."      <- the narrator
+      She was quiet.
+      I could hear the stove.
+      "Okay."                      <- HERS, not the narrator's
+      She turned back to it.
+
+- A first-person narrator describing someone else ("She was quiet", "She
+  stopped", "She turned back") is not speaking in those lines. Do not assign
+  a spoken line to the narrator merely because the narrator spoke last.
+- A name inside a spoken line is who is being ADDRESSED, not who is talking.
+  If someone says "Jack." they are calling to Jack, so the speaker is
+  somebody else.
 - Use UNKNOWN when you genuinely cannot tell. That is better than guessing;
   an unknown line is read by the narrator, which is never jarring."""
 
@@ -170,16 +187,23 @@ def build_roster(sentences: list[Sentence], title: str,
                  cfg: DirectorConfig) -> dict[str, Character]:
     """One pass over a sample of the book to learn who is in it."""
     # Characters are named in the narration around their dialogue, not in the
-    # dialogue itself, so the sample has to carry that narration with it —
+    # dialogue itself, so the sample has to carry that narration with it --
     # otherwise the model can only call someone "She".
-    keep: set[int] = set(range(min(40, len(sentences))))
-    for i, s in enumerate(sentences):
-        if s.role in ("speech", "tag"):
+    #
+    # The sample must also span the whole book. Sampling only the opening
+    # misses anyone introduced later, and a character who is not on the
+    # roster cannot be attributed at all: their lines get handed to whoever
+    # is on it.
+    keep: set[int] = set(range(min(30, len(sentences))))
+    speech_at = [i for i, s in enumerate(sentences) if s.role in ("speech", "tag")]
+    if speech_at:
+        budget = 150
+        stride = max(1, len(speech_at) // max(1, budget // 4))
+        for i in speech_at[::stride]:
             keep.update(range(max(0, i - 3), min(len(sentences), i + 2)))
-        if len(keep) > 130:
-            break
-    ordered = [sentences[i] for i in sorted(keep)][:140]
+    ordered = [sentences[i] for i in sorted(keep)][:220]
     lines = "\n".join(f"[{s.index}] ({s.role}) {s.text}" for s in ordered)
+
     rows = _ask(ROSTER_SYSTEM, f"Novel: {title}\n\n{lines}", cfg, ROSTER_SCHEMA)
 
     out: dict[str, Character] = {}
@@ -264,3 +288,118 @@ def track_pov(sentences: list[Sentence], roster: dict[str, Character]) -> None:
             if head and head.group(1).upper() in narrators:
                 current = head.group(1).upper()
         s.pov = current
+
+
+# ------------------------------------------------------------------ cast file
+
+
+def _line_key(text: str) -> str:
+    """Normalised key for a spoken line, stable across small edits."""
+    return re.sub(r"[^a-z0-9 ]+", "", text.lower()).strip()
+
+
+def apply_overrides(sentences: list[Sentence], conf: dict,
+                    roster: dict[str, Character]) -> tuple[int, list[str]]:
+    """Apply a reviewed cast file. Returns (lines changed, warnings).
+
+    Line overrides are keyed by the spoken text rather than by index, because
+    an index moves the moment a sentence is added anywhere earlier in the
+    book and would then silently reassign the wrong line.
+    """
+    changed = 0
+    warnings: list[str] = []
+
+    lines = conf.get("lines") or {}
+    wanted = {_line_key(k): v for k, v in lines.items()}
+    seen: set[str] = set()
+    for s in sentences:
+        if s.role != "speech":
+            continue
+        key = _line_key(s.text)
+        if key in wanted:
+            seen.add(key)
+            if s.speaker != wanted[key]:
+                s.speaker = wanted[key]
+                changed += 1
+    for key, who in wanted.items():
+        if key not in seen:
+            warnings.append(f'no spoken line matches "{key}" (assigned {who})')
+    return changed, warnings
+
+
+def ensure_cast(sentences: list[Sentence], cast: "Cast", available: set[str],
+                cfg: DirectorConfig, title: str = "") -> list[str]:
+    """Give a voice to anyone who speaks but was never cast.
+
+    A reviewed cast file often names someone the roster pass missed. They must
+    not silently fall back to the narrator, or the correction the reader just
+    made would do nothing.
+    """
+    notes: list[str] = []
+    speaking = {s.speaker.upper() for s in sentences
+                if s.role == "speech" and s.speaker}
+    missing = [w for w in sorted(speaking)
+               if w not in cast.characters and w not in (NARRATOR, "UNKNOWN")]
+    if not missing:
+        return notes
+
+    # Ask the model for a gender so the voice is not obviously wrong.
+    rows = _ask(ROSTER_SYSTEM,
+                f"Novel: {title}\nThese characters speak: {', '.join(missing)}.\n"
+                "Give each one's gender as used in the story.",
+                cfg, ROSTER_SCHEMA)
+    gender = {str(r.get("name", "")).upper(): str(r.get("gender", "unknown")).lower()
+              for r in rows}
+
+    used = {c.voice for c in cast.characters.values() if c.voice}
+    used.add(cast.narrator_voice)
+    for who in missing:
+        display = next((s.speaker for s in sentences
+                        if s.speaker.upper() == who), who)
+        g = gender.get(who, "unknown")
+        pool = MALE_POOL if g == "male" else FEMALE_POOL if g == "female" else \
+            MALE_POOL + FEMALE_POOL
+        voice = next((v for v in pool if v in available and v not in used), "")
+        cast.characters[who] = Character(name=display, gender=g, voice=voice)
+        used.add(voice)
+        notes.append(f"{display} ({g}) -> {voice or 'narrator voice'}")
+    return notes
+
+
+def write_review(path, sentences: list[Sentence], cast: "Cast",
+                 pov_voices: dict[str, str]) -> None:
+    """Emit an editable cast file describing what the model decided."""
+    from collections import Counter
+
+    counts = Counter(s.speaker or "UNKNOWN" for s in sentences if s.role == "speech")
+    out = ["# Cast file for narrator.",
+           "#",
+           "# Edit and pass back with --cast-file. Everything here is optional;",
+           "# whatever you leave out keeps the inferred value.",
+           "",
+           "[narrator]",
+           "# POV name -> voice. A section headed with this name narrates in it.",
+           ]
+    for name, voice in sorted(pov_voices.items()):
+        out.append(f'{name} = "{voice}"')
+    out += ["", "[characters]", "# character -> voice"]
+    for c in sorted(cast.characters.values(), key=lambda c: c.name):
+        if c.is_narrator:
+            continue
+        out.append(f'"{c.name}" = "{c.voice}"   # {c.gender}, '
+                   f'{counts.get(c.name, 0)} lines')
+    out += ["",
+            "[lines]",
+            "# Per-line corrections, keyed by the spoken text (punctuation and",
+            "# case are ignored). Uncomment and fix any line read by the wrong",
+            "# voice. NARRATOR means the point-of-view character.",
+            ""]
+    for s in sentences:
+        if s.role != "speech":
+            continue
+        who = s.speaker or "UNKNOWN"
+        text = s.text.replace('"', "'")
+        mark = "" if s.speaker else "  # <- not attributed"
+        out.append(f'# "{text}" = "{who}"{mark}')
+    pathlib_path = path if hasattr(path, "write_text") else __import__("pathlib").Path(path)
+    pathlib_path.write_text("\n".join(out) + "\n")

@@ -13,7 +13,8 @@ from rich.progress import (BarColumn, Progress as RichProgress, SpinnerColumn,
 
 from . import audio as A
 from . import extract
-from .cast import (Cast, assign_voices, attribute, build_roster, track_pov)
+from .cast import (Cast, apply_overrides, assign_voices, attribute,
+                   build_roster, ensure_cast, track_pov, write_review)
 from .director import (LOCAL_DEFAULT, DirectorConfig, direct,
                        ollama_available, profile_for)
 from .engines import (AVAILABLE, DIRECTION_PROFILE, EXPRESSIVENESS,
@@ -39,7 +40,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="infer who speaks each line and give characters their "
                         "own voices (kokoro; adds a second model pass)")
     p.add_argument("--cast-file", type=Path, default=None,
-                   help="TOML overriding the inferred casting")
+                   help="TOML overriding the inferred casting (see --cast-review)")
+    p.add_argument("--cast-review", type=Path, default=None,
+                   help="write an editable cast file describing what was "
+                        "inferred, then stop")
     p.add_argument("-o", "--out", type=Path, default=None,
                    help="write audio here (.m4b, .wav); default: alongside the source")
     p.add_argument("--no-play", action="store_true", help="render only, don't play")
@@ -184,11 +188,28 @@ def main(argv: list[str] | None = None) -> int:
                     pov_voices[name.upper()] = v
                 for name, v in (conf.get("characters") or {}).items():
                     key = name.upper()
-                    if key in cast_obj.characters:
-                        cast_obj.characters[key].voice = v if isinstance(v, str) else v.get("voice", "")
+                    voice = v if isinstance(v, str) else v.get("voice", "")
+                    if key not in cast_obj.characters:
+                        from .cast import Character
+                        cast_obj.characters[key] = Character(name=name)
+                    cast_obj.characters[key].voice = voice
+                changed, warnings = apply_overrides(sentences, conf,
+                                                    cast_obj.characters)
+                if changed:
+                    console.print(f"  [dim]{changed} line(s) reassigned from "
+                                  f"{args.cast_file.name}[/]")
+                for w in warnings:
+                    console.print(f"  [yellow]{escape(w)}[/]")
+                for note in ensure_cast(sentences, cast_obj, available, cfg,
+                                        doc.title):
+                    console.print(f"  [green]cast from file:[/] {escape(note)}")
             console.print("[bold]cast[/]")
             for line in cast_obj.summary():
                 console.print(f"  [dim]{line}[/]")
+            if args.cast_review:
+                write_review(args.cast_review, sentences, cast_obj, pov_voices)
+                console.print(f"[green]\u2713[/] wrote {args.cast_review}")
+                return 0
             attributed = sum(1 for x in sentences if x.role == "speech" and x.speaker)
             total_speech = sum(1 for x in sentences if x.role == "speech")
             console.print(f"  [dim]{attributed}/{total_speech} spoken lines attributed[/]\n")
