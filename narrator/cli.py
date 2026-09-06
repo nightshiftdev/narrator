@@ -208,8 +208,13 @@ def main(argv: list[str] | None = None) -> int:
                 if changed:
                     console.print(f"  [dim]{changed} line(s) reassigned from "
                                   f"{args.cast_file.name}[/]")
-                for w in warnings:
+                # A book-wide cast file names lines absent from one chapter,
+                # which is normal; show a few and count the rest.
+                for w in warnings[:5]:
                     console.print(f"  [yellow]{escape(w)}[/]")
+                if len(warnings) > 5:
+                    console.print(f"  [dim]…and {len(warnings) - 5} more lines "
+                                  f"in the cast file not present here[/]")
                 for note in ensure_cast(sentences, cast_obj, available, cfg,
                                         doc.title):
                     console.print(f"  [green]cast from file:[/] {escape(note)}")
@@ -225,9 +230,23 @@ def main(argv: list[str] | None = None) -> int:
             console.print(f"  [dim]{attributed}/{total_speech} spoken lines attributed[/]\n")
 
     if args.dry_run:
+        # When casting, show the voice each line will actually be read in:
+        # verifying that by ear over hours of audio is not reasonable.
+        voice_of = None
+        if cast_obj is not None:
+            probe2 = load_engine(args.engine, voice=args.voice,
+                                 cast=cast_obj, pov_voices=pov_voices or None)
+
+            def voice_of(sent):
+                return getattr(probe2, "_base_voice", lambda x: "")(sent)
+
         for s in sentences:
             emph = " ".join(f"*{w}*" for w in s.emphasis)
             who = f" [green]{s.speaker}[/]" if s.speaker else ""
+            if voice_of is not None:
+                v = voice_of(s)
+                flat = " flat" if cast_obj.is_flat(s) else ""
+                who += f" [blue]<{v}{flat}>[/]"
             console.print(
                 f"[dim]{s.index:>4}[/]{who} [cyan]{s.emotion:<14}[/]"
                 f"[magenta]{s.pace:.2f}[/] [yellow]{s.pause_after:.2f}s[/] "
