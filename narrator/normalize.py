@@ -275,6 +275,7 @@ def strip_divider(text: str) -> tuple[bool, str]:
 # ------------------------------------------------------------------ dialogue
 
 _QUOTES = '"\u201c\u201d'
+_QUOTES_RE = re.compile('[' + _QUOTES + ']')
 # he said, she asked, Ruth whispered, said Marlow — the subordinate half
 _TAG = re.compile(
     r"^\s*(?:[A-Z][\w'-]*\s+)?"
@@ -282,6 +283,16 @@ _TAG = re.compile(
     r"added|continued|repeated|offered|admitted|snapped|called|told|breathed|"
     r"echoed|murmured|insisted|observed|noted|began|finished)\b"
     r"[^.!?]*[.!?]?\s*$", re.I)
+
+
+# A quote mid-sentence is dialogue only when a speech verb introduces it:
+#   ...and said: "Tell me."          -> Sara speaks
+#   ...the market would "reallocate" -> the narrator is quoting a phrase
+_INTRODUCES_SPEECH = re.compile(
+    r"\b(?:said|says|asked|asks|replied|answered|whispered|shouted|muttered|"
+    r"added|continued|repeated|offered|admitted|snapped|called|told|breathed|"
+    r"echoed|murmured|insisted|observed|noted|began|read|wrote|announced)\b"
+    r"[\s:,\u2014-]*$", re.I)
 
 
 def _looks_like_tag(fragment: str) -> bool:
@@ -295,44 +306,84 @@ def split_dialogue(text: str, carry_open: bool) -> tuple[list[tuple[str, str]], 
     """Split a sentence into (role, text) parts and report the quote state.
 
     A straight double quote is both the opening and the closing mark, so
-    quotes are tracked as a toggle rather than as a matched pair, and the
-    open state is carried between sentences - a speech turn often runs
-    across several.
+    quotes are tracked as a toggle rather than as a matched pair, and the open
+    state is carried between sentences - a speech turn often runs across
+    several.
 
-    Only a sentence that opens a quote (or continues one) counts as speech;
-    a quoted phrase inside a clause is a quotation within narration, not a
-    line someone says, and keeps the narrator's voice.
+    A quoted span counts as speech when the sentence opens with it, when it
+    continues a turn already open, or when a speech verb introduces it. A
+    quoted phrase sitting inside a clause with no such verb is the narrator
+    quoting something, and keeps the narrator's voice.
     """
     stripped = text.lstrip()
     opens_here = bool(stripped) and stripped[0] in _QUOTES
-    if not carry_open and not opens_here:
+    if not carry_open and _QUOTES_RE.search(text) is None:
         return [("narration", text)], False
 
-    parts: list[tuple[str, str]] = []
+    # Break into alternating spans on the quote toggle.
+    spans: list[tuple[bool, str]] = []
     buf: list[str] = []
-    open_now = carry_open
-    role = "speech" if carry_open else "narration"
-
+    inside = carry_open
     for ch in text:
         if ch in _QUOTES:
-            if buf:
-                parts.append((role, "".join(buf).strip()))
+            spans.append((inside, "".join(buf)))
             buf = []
-            open_now = not open_now
-            role = "speech" if open_now else "after"
+            inside = not inside
             continue
         buf.append(ch)
-    if buf:
-        parts.append((role, "".join(buf).strip()))
+    spans.append((inside, "".join(buf)))
 
     out: list[tuple[str, str]] = []
-    for r, t in parts:
-        if not t:
+    preceding = ""
+    for i, (in_quote, body) in enumerate(spans):
+        chunk = body.strip()
+        if not chunk:
+            if not in_quote:
+                preceding = (preceding + " " + body)
             continue
-        if r == "after":
-            r = "tag" if _looks_like_tag(t) else "narration"
-        out.append((r, t))
-    return (out or [("narration", text)]), open_now
+        if not in_quote:
+            role = "tag" if (out and out[-1][0] == "speech"
+                             and _looks_like_tag(chunk)) else "narration"
+            out.append((role, chunk))
+            preceding = body
+            continue
+        # a quoted span: speech, or the narrator quoting a phrase?
+        is_speech = (carry_open and i == 0) or (opens_here and i == 1) \
+            or bool(_INTRODUCES_SPEECH.search(preceding))
+        out.append(("speech" if is_speech else "narration", chunk))
+        preceding = ""
+
+    # Stitch adjacent narration back together: a quoted phrase inside a clause
+    # must not become three clips with pauses between them.
+    merged: list[tuple[str, str]] = []
+    for role, chunk in out:
+        if merged and role == "narration" and merged[-1][0] == "narration":
+            joined = (merged[-1][1] + " " + chunk).replace(" ,", ",")
+            merged[-1] = ("narration", re.sub(r"\s+", " ", joined).strip())
+        else:
+            merged.append((role, chunk))
+    return (merged or [("narration", text)]), inside
+
+
+def _emit(sentences: list[Sentence], pieces: list[str], block: Block) -> None:
+    """Turn split sentences into Sentences, with dividers and dialogue handled.
+
+    Both the ordinary path and the scene-header path go through here; when
+    they did not, every line of dialogue in a block that opened with a POV
+    header was silently read by the narrator.
+    """
+    open_quote = False
+    for piece in pieces:
+        # a divider can also land mid-block, when the PDF text layer ran the
+        # break line into the surrounding paragraph
+        inner_break, piece = strip_divider(piece)
+        if inner_break and sentences:
+            sentences[-1].scene_break = True
+        if not piece.strip():
+            continue
+        parts, open_quote = split_dialogue(piece, open_quote)
+        for role, part in parts:
+            sentences.append(Sentence(part, block.index, block.kind, role=role))
 
 
 def segment(doc: Document, *, read_code: bool = False) -> list[Sentence]:
@@ -360,25 +411,9 @@ def segment(doc: Document, *, read_code: bool = False) -> list[Sentence]:
         elif (header := split_scene_header(b.text))[0]:
             head, rest = header
             sentences.append(Sentence(normalise(head), b.index, "heading"))
-            for x in split_sentences(normalise(rest)):
-                inner_break, x = strip_divider(x)
-                if inner_break and sentences:
-                    sentences[-1].scene_break = True
-                if x.strip():
-                    sentences.append(Sentence(x, b.index, b.kind))
+            _emit(sentences, split_sentences(normalise(rest)), b)
         else:
-            open_quote = False
-            for s in split_sentences(body):
-                # a divider can also land mid-block, when the PDF text layer
-                # ran the break line into the surrounding paragraph
-                inner_break, s = strip_divider(s)
-                if inner_break and sentences:
-                    sentences[-1].scene_break = True
-                if not s.strip():
-                    continue
-                parts, open_quote = split_dialogue(s, open_quote)
-                for role, part in parts:
-                    sentences.append(Sentence(part, b.index, b.kind, role=role))
+            _emit(sentences, split_sentences(body), b)
 
     for i, s in enumerate(sentences):
         s.index = i
