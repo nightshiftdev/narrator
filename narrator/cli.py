@@ -13,6 +13,7 @@ from rich.progress import (BarColumn, Progress as RichProgress, SpinnerColumn,
 
 from . import audio as A
 from . import extract
+from .cast import (Cast, assign_voices, attribute, build_roster, track_pov)
 from .director import (LOCAL_DEFAULT, DirectorConfig, direct,
                        ollama_available, profile_for)
 from .engines import (AVAILABLE, DIRECTION_PROFILE, EXPRESSIVENESS,
@@ -34,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--voice", default=None, help="voice name within the engine")
     p.add_argument("--dialogue-voice", default=None,
                    help="second voice for spoken lines (kokoro); off by default")
+    p.add_argument("--cast", action="store_true",
+                   help="infer who speaks each line and give characters their "
+                        "own voices (kokoro; adds a second model pass)")
+    p.add_argument("--cast-file", type=Path, default=None,
+                   help="TOML overriding the inferred casting")
     p.add_argument("-o", "--out", type=Path, default=None,
                    help="write audio here (.m4b, .wav); default: alongside the source")
     p.add_argument("--no-play", action="store_true", help="render only, don't play")
@@ -145,11 +151,54 @@ def main(argv: list[str] | None = None) -> int:
     else:
         direct(sentences, doc.title, DirectorConfig(enabled=False))
 
+    # ------------------------------------------------------------------ cast
+    cast_obj = None
+    pov_voices: dict[str, str] = {}
+    if args.cast:
+        from .engines import EXPRESSIVENESS
+        with console.status("[dim]reading the cast…"):
+            roster = build_roster(sentences, doc.title, cfg)
+        if not roster:
+            console.print("[yellow]no characters identified; single voice[/]")
+        else:
+            track_pov(sentences, roster)
+            with RichProgress(SpinnerColumn(), TextColumn("[dim]attributing"),
+                              BarColumn(), TextColumn("{task.completed}/{task.total}"),
+                              console=console, transient=console.is_terminal,
+                              disable=not console.is_terminal) as bar:
+                t = bar.add_task("attr", total=len(sentences))
+                attribute(sentences, roster, doc.title, cfg,
+                          on_progress=lambda d, tot: bar.update(t, completed=d))
+            from .engines import load_engine as _le
+            probe = _le(args.engine, voice=args.voice)
+            available = set(probe.voices())
+            narrator_voice = getattr(probe, "voice", "")
+            probe.close()
+            cast_obj = assign_voices(roster, narrator_voice, available)
+            pov_voices = {c.name.upper(): narrator_voice
+                          for c in roster.values() if c.is_narrator}
+            if args.cast_file and args.cast_file.exists():
+                import tomllib
+                conf = tomllib.loads(args.cast_file.read_text())
+                for name, v in (conf.get("narrator") or {}).items():
+                    pov_voices[name.upper()] = v
+                for name, v in (conf.get("characters") or {}).items():
+                    key = name.upper()
+                    if key in cast_obj.characters:
+                        cast_obj.characters[key].voice = v if isinstance(v, str) else v.get("voice", "")
+            console.print("[bold]cast[/]")
+            for line in cast_obj.summary():
+                console.print(f"  [dim]{line}[/]")
+            attributed = sum(1 for x in sentences if x.role == "speech" and x.speaker)
+            total_speech = sum(1 for x in sentences if x.role == "speech")
+            console.print(f"  [dim]{attributed}/{total_speech} spoken lines attributed[/]\n")
+
     if args.dry_run:
         for s in sentences:
             emph = " ".join(f"*{w}*" for w in s.emphasis)
+            who = f" [green]{s.speaker}[/]" if s.speaker else ""
             console.print(
-                f"[dim]{s.index:>4}[/] [cyan]{s.emotion:<14}[/]"
+                f"[dim]{s.index:>4}[/]{who} [cyan]{s.emotion:<14}[/]"
                 f"[magenta]{s.pace:.2f}[/] [yellow]{s.pause_after:.2f}s[/] "
                 f"{emph:<24} {s.text[:78]}"
             )
@@ -160,7 +209,8 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------ voice
     try:
         engine = load_engine(args.engine, voice=args.voice,
-                             dialogue_voice=args.dialogue_voice)
+                             dialogue_voice=args.dialogue_voice,
+                             cast=cast_obj, pov_voices=pov_voices or None)
     except (RuntimeError, ValueError) as exc:
         console.print(f"[red]{escape(str(exc))}[/]")
         return 1

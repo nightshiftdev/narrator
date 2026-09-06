@@ -100,7 +100,9 @@ class KokoroEngine(Engine):
     expressiveness = 2
 
     def __init__(self, voice: str | None = None, speed: float = 1.0,
-                 dialogue_voice: str | None = None):
+                 dialogue_voice: str | None = None,
+                 cast: "object | None" = None,
+                 pov_voices: dict[str, str] | None = None):
         self._ensure_weights()
         self._ensure_espeak()
 
@@ -129,6 +131,11 @@ class KokoroEngine(Engine):
         self.base_speed = speed
         self._pitch_axis, self._anim_axis = self._build_axes()
         self._style_cache: dict[tuple, np.ndarray] = {}
+        # Casting: a per-character voice map, and a narrating voice per
+        # point-of-view section for books that change narrator.
+        self.cast = cast
+        self.pov_voices = {k.upper(): v for k, v in (pov_voices or {}).items()
+                           if v in available}
         # Optional: a second voice for spoken lines. Kokoro cannot colour a
         # single voice, so casting is the only lever it has for dialogue.
         self.dialogue_voice = dialogue_voice if dialogue_voice in available else None
@@ -196,12 +203,25 @@ class KokoroEngine(Engine):
         spread = np.array([VOICE_STATS[v][1] for v in names])
         return direction(f0), direction(spread)
 
+    def _base_voice(self, sentence: Sentence) -> str:
+        """Whose voice reads this line: a cast character, or the narrator."""
+        if self.cast is not None:
+            v = self.cast.voice_for(sentence)
+            if v and v in self._voice_names:
+                return v
+        if sentence.pov and sentence.pov in self.pov_voices:
+            return self.pov_voices[sentence.pov]
+        return self.voice
+
     def _style_for(self, sentence: Sentence) -> "str | np.ndarray":
         """The style vector to read this sentence with."""
+        base_voice = self._base_voice(sentence)
         if self._pitch_axis is None:
-            return self.voice
+            return base_voice
         pitch, anim = EMOTION_STYLE.get(sentence.emotion, (0.0, 0.0))
-        if sentence.role == "speech":
+        cast_voiced = base_voice != self.voice
+        if sentence.role == "speech" and not cast_voiced:
+            # only lift when the narrator is doing the voice themselves
             pitch += SPEECH_LIFT[0]
             anim += SPEECH_LIFT[1]
         elif sentence.role == "tag":
@@ -211,15 +231,15 @@ class KokoroEngine(Engine):
         if sentence.kind in ("title", "chapter", "heading"):
             pitch, anim = pitch - 0.04, anim + 0.02
 
-        key = (round(pitch, 3), round(anim, 3))
-        if key == (0.0, 0.0):
-            return self.voice
+        key = (base_voice, round(pitch, 3), round(anim, 3))
+        if key[1] == 0.0 and key[2] == 0.0:
+            return base_voice
         cached = self._style_cache.get(key)
         if cached is None:
-            base = self._k.get_voice_style(self.voice)
+            base = self._k.get_voice_style(base_voice)
             scale = float(np.linalg.norm(base))
-            cached = base + scale * (key[0] * self._pitch_axis
-                                     + key[1] * self._anim_axis)
+            cached = base + scale * (key[1] * self._pitch_axis
+                                     + key[2] * self._anim_axis)
             self._style_cache[key] = cached
         return cached
 

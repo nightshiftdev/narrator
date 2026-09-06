@@ -49,6 +49,8 @@ class Sentence:
     scene_break: bool = False  # a "* * *" divider follows: hold the silence
     # "narration" | "speech" (inside quotes) | "tag" (he said / she asked)
     role: str = "narration"
+    speaker: str = ""      # who utters this line; "" means the narrator
+    pov: str = ""          # whose narration this is, for multi-POV books
 
 
 @dataclass
