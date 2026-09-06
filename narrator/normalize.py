@@ -97,37 +97,14 @@ CURRENCY = {"$": ("dollars", "dollar"), "£": ("pounds", "pound"), "€": ("euro
 MAGNITUDE = {"k": "thousand", "m": "million", "b": "billion", "bn": "billion",
              "t": "trillion", "tn": "trillion"}
 
-# Initialisms that really are read letter by letter. Everything else in caps
-# is assumed to be a word or a name — because in prose it usually is. A
-# character called MARLOW must never become "em ay arr ell oh double-you",
-# far more damaging to a listener than an acronym read as a word.
-LETTER_ACRONYMS = {
-    "FBI", "CIA", "NSA", "USA", "US", "UK", "EU", "UN", "USSR", "NHS", "IRS",
-    "CEO", "CFO", "CTO", "COO", "HR", "PR", "IT", "QA", "KPI", "ROI", "B2B",
-    "AI", "AGI", "API", "LLM", "CPU", "GPU", "RAM", "SSD", "URL", "HTML",
-    "CSS", "USB", "PDF", "SDK", "IDE", "OS", "PC", "TV", "DVD", "CD", "GPS",
-    "VPN", "IP", "ID", "UI", "UX", "DNA", "RNA", "HIV", "MRI", "CPR", "ER",
-    "PhD", "MBA", "MD", "BC", "AD", "AM", "PM", "FAQ", "ATM", "DIY", "PS",
-    "MIT", "NYU", "LA", "NYC", "DC", "UFO", "IQ", "GDP", "CPI", "IPO", "VC",
-}
-_VOWEL = re.compile(r"[AEIOUY]")
 
 
-# Spelling an initialism with periods ("F.B.I.") makes every engine read a
-# full stop between the letters, so you get "eff. bee. eye." with a beat in
-# each gap. Spelling the letter *names* gives the same reading, smoothly.
-LETTER_NAMES = {
-    "A": "ay", "B": "bee", "C": "see", "D": "dee", "E": "ee", "F": "eff",
-    "G": "jee", "H": "aitch", "I": "eye", "J": "jay", "K": "kay", "L": "ell",
-    "M": "em", "N": "en", "O": "oh", "P": "pee", "Q": "cue", "R": "arr",
-    "S": "ess", "T": "tee", "U": "you", "V": "vee", "W": "double-you",
-    "X": "ex", "Y": "why", "Z": "zee",
-}
-
-
-def _letters(word: str) -> str:
-    """FBI -> 'eff bee eye' — read as letters, spoken without gaps."""
-    return " ".join(LETTER_NAMES.get(c, c) for c in word.upper())
+# Initialisms are deliberately left alone. espeak already reads "AI" as
+# /ˌeɪˈaɪ/, "FBI" as /ˌɛfbˌiːˈaɪ/ and "NASA" as /nˈæsɐ/, and it reads an
+# all-capital name exactly as it reads the same name in title case. Every
+# attempt to help made it worse: spelling with periods put a full stop
+# between the letters, and spelling letter *names* ("ay eye") is phonemised
+# as "eye eye", because "ay" is /aɪ/ rather than /eɪ/.
 
 
 def normalise(text: str) -> str:
@@ -193,18 +170,6 @@ def normalise(text: str) -> str:
         return spell_int(n)
 
     s = re.sub(r"\b\d[\d,]*(?:\.\d+)?\b", _num, s)
-
-    # Capitalised runs: spell out only true initialisms, otherwise speak the
-    # word. Title-casing the rest stops engines shouting or spelling names.
-    def _acro(m: re.Match) -> str:
-        w = m.group(0)
-        if w in LETTER_ACRONYMS:
-            return _letters(w)
-        if len(w) <= 4 and not _VOWEL.search(w):
-            return _letters(w)          # BBC, NFL, TSA — unpronounceable
-        return w.title()                # MARLOW -> Marlow, NASA -> Nasa
-
-    s = re.sub(r"\b[A-Z]{2,}\b", _acro, s)
 
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"\s+([,.;:!?])", r"\1", s)

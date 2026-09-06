@@ -28,6 +28,64 @@ VOICES = CACHE / "voices-v1.0.bin"
 RELEASE = ("https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
            "model-files-v1.0")
 
+# Measured once per English voice on a fixed line: (median F0 in Hz, pitch
+# spread in semitones). Used to find directions in style space, not to pick a
+# voice — see _build_axes.
+VOICE_STATS: dict[str, tuple[float, float]] = {
+    "af_alloy": (143.7, 3.30),
+    "af_aoede": (175.2, 4.49),
+    "af_bella": (201.7, 3.25),
+    "af_heart": (193.5, 4.20),
+    "af_jessica": (205.1, 6.19),
+    "af_kore": (148.6, 4.30),
+    "af_nicole": (162.7, 4.28),
+    "af_nova": (158.9, 3.86),
+    "af_river": (180.5, 3.33),
+    "af_sarah": (192.0, 3.54),
+    "af_sky": (162.2, 5.01),
+    "am_adam": (120.3, 4.96),
+    "am_echo": (103.0, 5.14),
+    "am_eric": (156.9, 4.41),
+    "am_fenrir": (133.3, 4.58),
+    "am_liam": (118.2, 5.46),
+    "am_michael": (114.8, 3.59),
+    "am_onyx": (85.6, 4.35),
+    "am_puck": (113.7, 3.72),
+    "am_santa": (208.7, 5.69),
+    "bf_alice": (218.2, 4.54),
+    "bf_emma": (177.8, 3.15),
+    "bf_isabella": (205.1, 2.74),
+    "bf_lily": (181.8, 4.24),
+    "bm_daniel": (127.7, 3.59),
+    "bm_fable": (114.3, 4.84),
+    "bm_george": (143.7, 4.35),
+    "bm_lewis": (94.7, 5.86),
+}
+
+
+# Emotion as an offset along those two directions, in units of the base
+# voice's norm. Small: past about 0.2 the speaker stops sounding like the
+# same person. (pitch, animation)
+EMOTION_STYLE: dict[str, tuple[float, float]] = {
+    "neutral":       (0.00,  0.00),
+    "warm":          (0.02,  0.05),
+    "curious":       (0.05,  0.08),
+    "excited":       (0.10,  0.14),
+    "urgent":        (0.08,  0.12),
+    "tense":         (0.04,  0.08),
+    "wry":           (0.03,  0.06),
+    "authoritative": (-0.04, 0.02),
+    "reflective":    (-0.05, 0.02),
+    "tender":        (-0.03, -0.01),
+    "somber":        (-0.10, -0.04),
+    "ominous":       (-0.14, -0.02),
+}
+
+# Spoken lines sit slightly forward of the narration around them: a shade
+# brighter and more animated, the way a reader lifts into a character.
+SPEECH_LIFT = (0.05, 0.07)
+
+
 # Voices worth using for long-form narration, best first.
 PREFERRED = ["am_michael", "bm_george", "af_heart", "bf_emma", "am_fenrir",
              "af_bella", "am_puck"]
@@ -36,7 +94,10 @@ PREFERRED = ["am_michael", "bm_george", "af_heart", "bf_emma", "am_fenrir",
 class KokoroEngine(Engine):
     name = "kokoro"
     rate = 24_000
-    expressiveness = 1
+    # Kokoro takes no emotion input, but its style vector *is* a delivery
+    # control: moving along measured pitch/animation directions changes how a
+    # line is performed while leaving the speaker recognisably the same.
+    expressiveness = 2
 
     def __init__(self, voice: str | None = None, speed: float = 1.0,
                  dialogue_voice: str | None = None):
@@ -61,10 +122,13 @@ class KokoroEngine(Engine):
 
         self._k = Kokoro(str(MODEL), str(VOICES))
         available = set(self._k.get_voices())
+        self._voice_names = available
         self.voice = voice if voice in available else next(
             (v for v in PREFERRED if v in available), sorted(available)[0]
         )
         self.base_speed = speed
+        self._pitch_axis, self._anim_axis = self._build_axes()
+        self._style_cache: dict[tuple, np.ndarray] = {}
         # Optional: a second voice for spoken lines. Kokoro cannot colour a
         # single voice, so casting is the only lever it has for dialogue.
         self.dialogue_voice = dialogue_voice if dialogue_voice in available else None
@@ -99,6 +163,66 @@ class KokoroEngine(Engine):
         except Exception:
             pass
 
+    # ---------------------------------------------------------- style space
+    def _build_axes(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Find the directions in style space that carry pitch and liveliness.
+
+        Kokoro conditions delivery on a per-voice style vector. Regressing
+        those vectors against measured pitch and pitch-spread gives two
+        directions that behave like performance controls: step along them and
+        the same speaker reads the line higher/lower and livelier/flatter.
+
+        Derived from the local voice file, so it costs no synthesis.
+        """
+        names = [v for v in VOICE_STATS if v in self._voice_names]
+        if len(names) < 8:
+            return None, None
+        try:
+            styles = np.stack([self._k.get_voice_style(v) for v in names])
+        except Exception:
+            return None, None
+        centroid = styles.mean(0)
+
+        def direction(values: np.ndarray) -> np.ndarray | None:
+            spread = values.std()
+            if spread < 1e-6:
+                return None
+            z = (values - values.mean()) / spread
+            axis = (z[:, None, None, None] * (styles - centroid)).sum(0)
+            norm = np.linalg.norm(axis)
+            return axis / norm if norm > 0 else None
+
+        f0 = np.log(np.array([VOICE_STATS[v][0] for v in names]))
+        spread = np.array([VOICE_STATS[v][1] for v in names])
+        return direction(f0), direction(spread)
+
+    def _style_for(self, sentence: Sentence) -> "str | np.ndarray":
+        """The style vector to read this sentence with."""
+        if self._pitch_axis is None:
+            return self.voice
+        pitch, anim = EMOTION_STYLE.get(sentence.emotion, (0.0, 0.0))
+        if sentence.role == "speech":
+            pitch += SPEECH_LIFT[0]
+            anim += SPEECH_LIFT[1]
+        elif sentence.role == "tag":
+            # an attribution drops back out of the character and under the line
+            pitch -= 0.03
+            anim -= 0.05
+        if sentence.kind in ("title", "chapter", "heading"):
+            pitch, anim = pitch - 0.04, anim + 0.02
+
+        key = (round(pitch, 3), round(anim, 3))
+        if key == (0.0, 0.0):
+            return self.voice
+        cached = self._style_cache.get(key)
+        if cached is None:
+            base = self._k.get_voice_style(self.voice)
+            scale = float(np.linalg.norm(base))
+            cached = base + scale * (key[0] * self._pitch_axis
+                                     + key[1] * self._anim_axis)
+            self._style_cache[key] = cached
+        return cached
+
     # ------------------------------------------------------------- direction
     @staticmethod
     def _shape(s: Sentence) -> str:
@@ -130,7 +254,7 @@ class KokoroEngine(Engine):
         text = self._shape(sentence)
         speed = float(np.clip(self.base_speed * sentence.pace, 0.6, 1.6))
         voice = (self.dialogue_voice if sentence.role == "speech"
-                 and self.dialogue_voice else self.voice)
+                 and self.dialogue_voice else self._style_for(sentence))
         try:
             samples, sr = self._k.create(text, voice=voice, speed=speed, lang="en-us")
         except Exception:

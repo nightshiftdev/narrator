@@ -38,6 +38,8 @@ EMOTIONS = [
 PROFILES: dict[str, list[str]] = {
     # engine expressiveness <= 1: only timing reaches the voice
     "timing":  ["i", "pace", "pause_after"],
+    # emotion reaches the voice but per-word stress does not
+    "colour":  ["i", "emotion", "pace", "pause_after"],
     # == 2: pitch and stress are controllable too
     "prosody": ["i", "emotion", "pace", "emphasis", "pause_after"],
     # >= 3: the engine reads direction as direction
@@ -162,7 +164,8 @@ class DirectorConfig:
                    jobs=jobs, profile=profile)
 
 
-# An engine can only be directed as far as it can perform.
+# An engine can only be directed as far as it can perform. Engines name their
+# own profile; this is the fallback when one does not.
 def profile_for(expressiveness: int) -> str:
     if expressiveness <= 1:
         return "timing"

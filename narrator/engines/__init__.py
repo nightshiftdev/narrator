@@ -16,9 +16,20 @@ AVAILABLE = list(_BUILDERS)
 # the director can size its work without importing (and loading) an engine.
 EXPRESSIVENESS = {
     "macsay": 2,
-    "kokoro": 1,
+    "kokoro": 2,
     "elevenlabs": 3,
     "chatterbox": 3,
+}
+
+# The direction each backend can actually act on. Asking for more than this
+# costs generation time and changes no audio.
+#   kokoro  - emotion via style space, but no per-word stress
+#   macsay  - emotion via pitch, and stress via [[emph]]
+DIRECTION_PROFILE = {
+    "macsay": "prosody",
+    "kokoro": "colour",
+    "elevenlabs": "full",
+    "chatterbox": "full",
 }
 
 
@@ -42,4 +53,5 @@ def load_engine(name: str, **kwargs) -> Engine:
                   if v is not None and k in accepted})
 
 
-__all__ = ["Clip", "Engine", "load_engine", "AVAILABLE", "EXPRESSIVENESS"]
+__all__ = ["Clip", "Engine", "load_engine", "AVAILABLE", "EXPRESSIVENESS",
+           "DIRECTION_PROFILE"]

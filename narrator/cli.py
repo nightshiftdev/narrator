@@ -15,7 +15,8 @@ from . import audio as A
 from . import extract
 from .director import (LOCAL_DEFAULT, DirectorConfig, direct,
                        ollama_available, profile_for)
-from .engines import AVAILABLE, EXPRESSIVENESS, load_engine
+from .engines import (AVAILABLE, DIRECTION_PROFILE, EXPRESSIVENESS,
+                       load_engine)
 from .normalize import segment
 from .pipeline import Renderer, collect
 
@@ -49,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--director-jobs", type=int, default=None,
                    help="batches to direct concurrently (default 4 local, 3 cloud)")
     p.add_argument("--director-profile", default="auto",
-                   choices=["auto", "timing", "prosody", "full"],
+                   choices=["auto", "timing", "colour", "prosody", "full"],
                    help="how much direction to generate; auto matches the engine")
     p.add_argument("--speed", type=float, default=1.0, help="playback rate multiplier")
     p.add_argument("--from", dest="start", type=int, default=0,
@@ -95,8 +96,9 @@ def main(argv: list[str] | None = None) -> int:
     provider = "off" if args.no_direct else args.director
     # Generating direction the engine cannot honour costs real time and
     # changes no audio, so ask only for what this voice can perform.
-    profile = (profile_for(EXPRESSIVENESS.get(args.engine, 3))
-               if args.director_profile == "auto" else args.director_profile)
+    profile = (DIRECTION_PROFILE.get(args.engine)
+               or profile_for(EXPRESSIVENESS.get(args.engine, 3))
+               ) if args.director_profile == "auto" else args.director_profile
     if provider == "local":
         cfg = DirectorConfig.local(args.director_model or LOCAL_DEFAULT,
                                    profile=profile)
