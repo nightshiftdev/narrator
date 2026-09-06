@@ -1,17 +1,23 @@
 [project]
 name = "narrator"
 version = "0.1.0"
-description = "Add your description here"
+description = "Read md/pdf/txt aloud with an actual performance: an LLM directs pace, pauses and emphasis; a neural voice speaks it."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "espeakng-loader>=0.2.4",
+    "numpy>=2.0",
+    "pypdfium2>=5.0",
+    "rich>=13.0",
+    "soundfile>=0.12",
+]
+
+# The local neural voice is optional because its dependency chain is GPL:
+# kokoro-onnx -> phonemizer -> espeak-ng. Installing this extra makes your
+# installation GPL-3.0; the narrator source itself stays MIT.
+[project.optional-dependencies]
+kokoro = [
     "kokoro-onnx>=0.6.1",
-    "markdown-it-py>=4.2.0",
-    "numpy>=2.5.2",
-    "pymupdf>=1.28.2",
-    "rich>=15.0.0",
-    "soundfile>=0.14.0",
+    "espeakng-loader>=0.2.4",
 ]
 
 [project.scripts]
@@ -19,3 +25,7 @@ narrate = "narrator.cli:main"
 
 [tool.setuptools]
 packages = ["narrator", "narrator.engines"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (BarColumn, Progress as RichProgress, SpinnerColumn,
                            TextColumn, TimeRemainingColumn)
 
@@ -159,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         engine = load_engine(args.engine, voice=args.voice,
                              dialogue_voice=args.dialogue_voice)
     except (RuntimeError, ValueError) as exc:
-        console.print(f"[red]{exc}[/]")
+        console.print(f"[red]{escape(str(exc))}[/]")
         return 1
     console.print(f"[dim]engine {engine.name} · voice {getattr(engine, 'voice', '—')}[/]\n")
 

@@ -24,9 +24,9 @@ file ─▶ extract ─▶ normalise ─▶ DIRECT ─▶ synthesise ─▶ mast
 
 **extract** — structure-aware. Headings, quotes, lists and code survive as
 distinct kinds, because a heading should be read as an arrival and a block
-quote should be read differently from the prose around it. PDFs get font-size
-heading detection, hyphen-break repair, page-number stripping and duplicate
-text-layer collapsing.
+quote should be read differently from the prose around it. PDFs (via pdfium) get font-size heading
+detection, hyphen-break repair, page-number stripping — only at a page edge,
+so a bare "5" mid-page stays content — and duplicate text-layer collapsing.
 
 **normalise** — a large share of the robot feeling lives here, not in the
 voice. `1969` becomes *nineteen sixty-nine*, not *one thousand nine hundred
@@ -139,8 +139,14 @@ if that's set.
 ## Install
 
 ```bash
-uv sync && uv pip install -e .
+uv sync                     # MIT-only: macsay and elevenlabs engines
+uv sync --extra kokoro      # adds the local neural voice (pulls GPL deps)
 ```
+
+`narrator` is MIT. The default install has **no copyleft dependencies**. The
+Kokoro extra pulls `kokoro-onnx -> phonemizer -> espeak-ng`, which is GPL-3.0
+— see [NOTICE.md](NOTICE.md) for why that is unavoidable and what your
+permissive alternatives are.
 
 Kokoro weights (~330 MB, once):
 
@@ -149,3 +155,8 @@ mkdir -p ~/.cache/narrator/kokoro && cd ~/.cache/narrator/kokoro
 B=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
 curl -fLO $B/kokoro-v1.0.onnx && curl -fLO $B/voices-v1.0.bin
 ```
+
+## Licence
+
+MIT — see [LICENSE](LICENSE). Dependency licences and the one GPL caveat are
+documented in [NOTICE.md](NOTICE.md).

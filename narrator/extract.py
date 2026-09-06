@@ -157,35 +157,85 @@ _HYPHEN_BREAK = re.compile(r"(\w)-\s*\n\s*(\w)")
 _PAGE_NUM = re.compile(r"^\s*(?:page\s+)?[ivxlcdm\d]{1,6}\s*$", re.I)
 
 
-def extract_pdf(path: Path) -> Document:
-    import pymupdf as fitz
+def _pdf_lines(path: Path) -> list[tuple[str, float, int]]:
+    """(text, font size, page) for every line, in reading order.
 
-    doc = fitz.open(path)
-    title = (doc.metadata or {}).get("title") or path.stem
-    title = title.strip() or path.stem
+    pdfium reports a font size and a *loose* box per character. The loose box
+    is line-based rather than glyph-based, so its top edge is stable across
+    letters of different height — that is what makes it usable for grouping
+    characters back into lines.
+    """
+    import ctypes
 
-    # Collect per-page text with font sizes so we can spot headings.
-    blocks: list[Block] = []
-    sizes: list[float] = []
-    page_spans: list[list[tuple[str, float, int]]] = []
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
 
-    for pno, page in enumerate(doc):
-        spans: list[tuple[str, float, int]] = []
-        data = page.get_text("dict")
-        for blk in data.get("blocks", []):
-            if blk.get("type") != 0:
-                continue
-            for line in blk.get("lines", []):
-                text = "".join(s.get("text", "") for s in line.get("spans", []))
-                if not text.strip():
+    out: list[tuple[str, float, int]] = []
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        for pno in range(len(pdf)):
+            page = pdf[pno]
+            tp = page.get_textpage()
+            cur: list[str] = []
+            cur_size = 0.0
+            cur_top: float | None = None
+            box = raw.FS_RECTF()
+
+            for i in range(tp.count_chars()):
+                ch = chr(raw.FPDFText_GetUnicode(tp, i))
+                if ch in "\r\n":
                     continue
-                size = max((s.get("size", 0.0) for s in line.get("spans", [])), default=0.0)
-                spans.append((text, size, pno))
-                sizes.append(size)
-        page_spans.append(spans)
+                size = raw.FPDFText_GetFontSize(tp, i)
+                raw.FPDFText_GetLooseCharBox(tp, i, ctypes.byref(box))
+                top = round(box.top, 1)
+                if cur_top is not None and abs(top - cur_top) > 2:
+                    text = "".join(cur).strip()
+                    if text:
+                        out.append((text, round(cur_size, 1), pno))
+                    cur, cur_size = [], 0.0
+                cur.append(ch)
+                cur_size = max(cur_size, size)
+                cur_top = top
 
+            text = "".join(cur).strip()
+            if text:
+                out.append((text, round(cur_size, 1), pno))
+    finally:
+        pdf.close()
+    return out
+
+
+def _pdf_title(path: Path) -> str:
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        meta = pdf.get_metadata_dict() or {}
+    except Exception:
+        meta = {}
+    finally:
+        pdf.close()
+    return (meta.get("Title") or "").strip() or path.stem
+
+
+def extract_pdf(path: Path) -> Document:
+    title = _pdf_title(path)
+    lines = _pdf_lines(path)
+    sizes = [size for _, size, _ in lines]
     body_size = _mode(sizes) if sizes else 10.0
-    # Merge lines into paragraphs; promote clearly larger lines to headings.
+
+    # A bare number is only a page number when it sits alone at the top or
+    # bottom of a page. In the middle of a page it is content — "5" in
+    # "0.5 Continuing Education Units; 5 Professional Development Hours".
+    edge: set[int] = set()
+    by_page: dict[int, list[int]] = {}
+    for idx, (_, _, pno) in enumerate(lines):
+        by_page.setdefault(pno, []).append(idx)
+    for idxs in by_page.values():
+        edge.add(idxs[0])
+        edge.add(idxs[-1])
+
+    blocks: list[Block] = []
     buf: list[str] = []
     buf_page = 0
 
@@ -202,41 +252,45 @@ def extract_pdf(path: Path) -> Document:
     # Designed PDFs often stack duplicate text layers (drop shadows, outlines);
     # left alone they make the narrator stutter.
     prev_line = ""
-    for spans in page_spans:
-        for text, size, pno in spans:
-            s = text.strip()
-            if not s or _PAGE_NUM.fullmatch(s):
-                continue
-            collapsed = " ".join(s.split())
-            if collapsed == prev_line:
-                continue
-            # "PAWEL KIJOWSKI" immediately after "PAWEL" is the same layer twice
-            if prev_line and (collapsed.startswith(prev_line + " ")
-                              or prev_line.startswith(collapsed + " ")):
-                continue
-            # a line that is its own halves repeated: "certify that certify that"
-            words = collapsed.split()
-            half = len(words) // 2
-            if half and words[:half] == words[half:half * 2] and len(words) % 2 == 0:
-                collapsed = " ".join(words[:half])
-                s = collapsed
-            prev_line = collapsed
-            is_heading = size > body_size * 1.15 and len(s) < 120
-            if is_heading:
-                flush()
-                buf_page = pno
-                level = 1 if size > body_size * 1.5 else 2
-                kind = "title" if level == 1 and not blocks else "chapter"
-                blocks.append(Block(kind, s, level=level, index=len(blocks), source_page=pno))
-                continue
-            if not buf:
-                buf_page = pno
-            buf.append(s)
-            # a line ending in sentence punctuation and short is likely a para end
-            if s.endswith((".", "!", "?", '"', "”")) and len(" ".join(buf)) > 200:
-                flush()
+
+    for idx, (text, size, pno) in enumerate(lines):
+        s = text.strip()
+        if not s:
+            continue
+        if idx in edge and _PAGE_NUM.fullmatch(s):
+            continue
+        collapsed = " ".join(s.split())
+        if collapsed == prev_line:
+            continue
+        # Only treat a prefix repeat as a stacked layer when the shared part
+        # is substantial — otherwise a legitimately short line ("5", "and")
+        # gets swallowed by the sentence that happens to follow it.
+        shorter = min(collapsed, prev_line, key=len)
+        if (prev_line and len(shorter) >= 8
+                and (collapsed.startswith(prev_line + " ")
+                     or prev_line.startswith(collapsed + " "))):
+            continue
+        words = collapsed.split()
+        half = len(words) // 2
+        if half and words[:half] == words[half:half * 2] and len(words) % 2 == 0:
+            collapsed = " ".join(words[:half])
+            s = collapsed
+        prev_line = collapsed
+
+        if size > body_size * 1.15 and len(s) < 120:
+            flush()
+            level = 1 if size > body_size * 1.5 else 2
+            kind = "title" if level == 1 and not blocks else "chapter"
+            blocks.append(Block(kind, s, level=level, index=len(blocks), source_page=pno))
+            continue
+
+        if not buf:
+            buf_page = pno
+        buf.append(s)
+        if s.endswith((".", "!", "?", '"', "\u201d")) and len(" ".join(buf)) > 200:
+            flush()
+
     flush()
-    doc.close()
     return Document(title=title, blocks=blocks)
 
 

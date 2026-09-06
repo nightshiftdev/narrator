@@ -48,7 +48,16 @@ class KokoroEngine(Engine):
         logging.getLogger("phonemizer").setLevel(logging.ERROR)
         logging.getLogger("kokoro_onnx").setLevel(logging.ERROR)
 
-        from kokoro_onnx import Kokoro
+        try:
+            from kokoro_onnx import Kokoro
+        except ImportError as exc:
+            raise RuntimeError(
+                "the kokoro voice is not installed.\n"
+                "  uv sync --extra kokoro       (or: pip install 'narrator[kokoro]')\n"
+                "\n"
+                "It is an optional extra because its dependency chain\n"
+                "(kokoro-onnx -> phonemizer -> espeak-ng) is GPL-3.0."
+            ) from exc
 
         self._k = Kokoro(str(MODEL), str(VOICES))
         available = set(self._k.get_voices())
