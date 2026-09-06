@@ -1,0 +1,21 @@
+[project]
+name = "narrator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "espeakng-loader>=0.2.4",
+    "kokoro-onnx>=0.6.1",
+    "markdown-it-py>=4.2.0",
+    "numpy>=2.5.2",
+    "pymupdf>=1.28.2",
+    "rich>=15.0.0",
+    "soundfile>=0.14.0",
+]
+
+[project.scripts]
+narrate = "narrator.cli:main"
+
+[tool.setuptools]
+packages = ["narrator", "narrator.engines"]

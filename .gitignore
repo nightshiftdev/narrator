@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv/
+
+# macOS
+.DS_Store
+
+# Rendered audio — large, and derived from whatever you fed in
+out/
+*.m4b
+*.m4a
+*.wav
+*.chapters.txt
+
+# Private source documents. Keep your manuscripts out of the repo.
+hallucination-test/
+books/
+private/
