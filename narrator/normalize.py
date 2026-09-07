@@ -90,7 +90,7 @@ INLINE = {
     "&": " and ", "%": " percent", "×": " times ", "÷": " divided by ",
     "→": " leads to ", "≈": " roughly ", "≤": " at most ", "≥": " at least ",
     "±": " plus or minus ",
-    "™": "", "®": "", "©": "copyright ", "…": "...", "–": "—",
+    "™": "", "®": "", "…": "...", "–": "—",
 }
 
 CURRENCY = {"$": ("dollars", "dollar"), "£": ("pounds", "pound"), "€": ("euros", "euro")}
@@ -149,6 +149,11 @@ def normalise(text: str) -> str:
 
     for k, v in INLINE.items():
         s = re.sub(re.escape(k), v, s, flags=re.I if k.isalpha() or "." in k else 0)
+
+    # "Copyright (c) 2026" must not become "Copyright copyright 2026"
+    s = re.sub(r"(?i)\bcopyright\s*\u00a9", "Copyright", s)
+    s = re.sub(r"\u00a9\s*(?=\d)", "Copyright ", s)
+    s = s.replace("\u00a9", "copyright")
 
     # temperatures before the generic degree sign
     s = re.sub(r"\s*°\s*C\b", " degrees Celsius", s)

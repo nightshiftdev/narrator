@@ -142,6 +142,35 @@ class Cast:
                 return cand
         return key
 
+    def merge_aliases(self) -> list[tuple[str, str]]:
+        """Collapse cast entries that name the same person.
+
+        A roster built by a model reports Yael, and a cast file written by a
+        person says Yael Gur. Kept apart they are two characters with two
+        voices, and one person changes voice mid-scene. The entry carrying an
+        explicit voice, or the more specific name, wins.
+        """
+        merged: list[tuple[str, str]] = []
+        keys = sorted(self.characters, key=lambda k: (-len(k.split()), k))
+        for key in list(keys):
+            if key not in self.characters:
+                continue
+            for other in list(self.characters):
+                if other == key or other not in self.characters:
+                    continue
+                a, b = key.split(), other.split()
+                if a[0] != b[0] and a[-1] != b[-1]:
+                    continue
+                keep, drop = self.characters[key], self.characters[other]
+                if drop.voice and not keep.voice:
+                    keep.voice = drop.voice
+                keep.is_narrator = keep.is_narrator or drop.is_narrator
+                if drop.gender != "unknown" and keep.gender == "unknown":
+                    keep.gender = drop.gender
+                del self.characters[other]
+                merged.append((drop.name, keep.name))
+        return merged
+
     def voice_for(self, sentence: Sentence) -> str:
         """The voice this line should be read in, or "" for the narrator."""
         who = sentence.speaker
@@ -350,11 +379,18 @@ def assign_voices(roster: dict[str, Character], narrator_voice: str,
     narrators.sort(key=lambda c: order.index(c.name.upper())
                    if c.name.upper() in order else len(order))
     for i, c in enumerate(narrators):
+        if c.voice:
+            taken.add(c.voice)          # already cast, by a cast file
+            continue
         c.voice = narrator_voice if i == 0 else take(c.gender)
 
     for c in sorted(roster.values(), key=lambda c: c.name):
-        if not c.is_narrator:
-            c.voice = take(c.gender)
+        if c.is_narrator:
+            continue
+        if c.voice:
+            taken.add(c.voice)          # a reader's choice is never overridden
+            continue
+        c.voice = take(c.gender)
     return Cast(characters=roster, narrator_voice=narrator_voice)
 
 
@@ -442,7 +478,8 @@ def apply_overrides(sentences: list[Sentence], conf: dict,
 
 
 def ensure_cast(sentences: list[Sentence], cast: "Cast", available: set[str],
-                cfg: DirectorConfig, title: str = "") -> list[str]:
+                cfg: DirectorConfig, title: str = "",
+                reserved: set[str] | None = None) -> list[str]:
     """Give a voice to anyone who speaks but was never cast.
 
     A reviewed cast file often names someone the roster pass missed. They must
@@ -452,8 +489,15 @@ def ensure_cast(sentences: list[Sentence], cast: "Cast", available: set[str],
     notes: list[str] = []
     speaking = {s.speaker.upper() for s in sentences
                 if s.role == "speech" and s.speaker}
-    missing = [w for w in sorted(speaking)
-               if w not in cast.characters and w not in (NARRATOR, "UNKNOWN")]
+    # Resolve against the existing cast first: "Yael" must not become a second
+    # character alongside "Yael Gur", with a second voice.
+    missing = []
+    for w in sorted(speaking):
+        if w in (NARRATOR, "UNKNOWN"):
+            continue
+        if cast.resolve(w) in cast.characters:
+            continue
+        missing.append(w)
     if not missing:
         return notes
 
@@ -467,6 +511,10 @@ def ensure_cast(sentences: list[Sentence], cast: "Cast", available: set[str],
 
     used = {c.voice for c in cast.characters.values() if c.voice}
     used.add(cast.narrator_voice)
+    # Every point-of-view narrating voice is spoken for, even though those
+    # voices live outside cast.characters. Without this a character is handed
+    # the voice a whole section is narrated in.
+    used |= (reserved or set())
     for who in missing:
         display = next((s.speaker for s in sentences
                         if s.speaker.upper() == who), who)

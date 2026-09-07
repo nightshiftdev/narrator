@@ -13,7 +13,7 @@ from rich.progress import (BarColumn, Progress as RichProgress, SpinnerColumn,
 
 from . import audio as A
 from . import extract
-from .cast import (Cast, apply_overrides, assign_voices, attribute,
+from .cast import (Cast, Character, apply_overrides, assign_voices, attribute,
                    build_roster, ensure_cast, track_pov, write_review)
 from .director import (LOCAL_DEFAULT, DirectorConfig, direct,
                        ollama_available, profile_for)
@@ -178,64 +178,82 @@ def main(argv: list[str] | None = None) -> int:
             available = set(probe.voices())
             narrator_voice = getattr(probe, "voice", "")
             probe.close()
+
             pov_order: list[str] = []
             for x in sentences:
                 if x.pov and x.pov not in pov_order:
                     pov_order.append(x.pov)
-            cast_obj = assign_voices(roster, narrator_voice, available, pov_order)
-            pov_voices = {c.name.upper(): (c.voice or narrator_voice)
-                          for c in roster.values() if c.is_narrator}
+
+            # Read the cast file before assigning anything: its voices have to
+            # be reserved, or an auto-assigned character takes the voice a
+            # whole point-of-view section is narrated in.
+            conf: dict = {}
             if args.cast_file and args.cast_file.exists():
                 import tomllib
                 conf = tomllib.loads(args.cast_file.read_text())
-                for name, v in (conf.get("narrator") or {}).items():
-                    pov_voices[name.upper()] = v
-                for name, v in (conf.get("characters") or {}).items():
-                    key = name.upper()
-                    voice = v if isinstance(v, str) else v.get("voice", "")
-                    if key not in cast_obj.characters:
-                        from .cast import Character
-                        cast_obj.characters[key] = Character(name=name)
-                    cast_obj.characters[key].voice = voice
-                flat = conf.get("flat") or []
-                if isinstance(flat, list):
-                    cast_obj.flat = {str(x).upper() for x in flat}
-                    if cast_obj.flat:
-                        console.print("  [dim]read flat (no emotional "
-                                      f"colour): {', '.join(sorted(cast_obj.flat))}[/]")
+            for name, v in (conf.get("characters") or {}).items():
+                key = name.upper()
+                if key not in roster:
+                    from .cast import Character
+                    roster[key] = Character(name=name)
+                roster[key].voice = v if isinstance(v, str) else v.get("voice", "")
+            pov_voices = {k.upper(): v for k, v in (conf.get("narrator") or {}).items()}
+
+            cast_obj = Cast(characters=roster, narrator_voice=narrator_voice)
+            for old, new_ in cast_obj.merge_aliases():
+                console.print(f"  [dim]{old} and {new_} are the same character[/]")
+            reserved = set(pov_voices.values()) | {
+                c.voice for c in roster.values() if c.voice}
+            cast_obj = assign_voices(roster, narrator_voice, available - reserved,
+                                     pov_order)
+            cast_obj.narrator_voice = narrator_voice
+            for k, v in pov_voices.items():
+                if k in cast_obj.characters:
+                    cast_obj.characters[k].voice = v
+            if not pov_voices:
+                pov_voices = {c.name.upper(): (c.voice or narrator_voice)
+                              for c in roster.values() if c.is_narrator}
+
+            flat = conf.get("flat") or []
+            if isinstance(flat, list) and flat:
+                cast_obj.flat = {str(x).upper() for x in flat}
+                console.print("  [dim]read flat (no emotional colour): "
+                              f"{', '.join(sorted(cast_obj.flat))}[/]")
+            if conf:
                 changed, warnings = apply_overrides(sentences, conf,
                                                     cast_obj.characters)
                 if changed:
                     console.print(f"  [dim]{changed} line(s) reassigned from "
                                   f"{args.cast_file.name}[/]")
-                # A book-wide cast file names lines absent from one chapter,
-                # which is normal; show a few and count the rest.
                 for w in warnings[:5]:
                     console.print(f"  [yellow]{escape(w)}[/]")
                 if len(warnings) > 5:
                     console.print(f"  [dim]…and {len(warnings) - 5} more lines "
                                   f"in the cast file not present here[/]")
-                for note in ensure_cast(sentences, cast_obj, available, cfg,
-                                        doc.title):
-                    console.print(f"  [green]cast from file:[/] {escape(note)}")
+            for note in ensure_cast(sentences, cast_obj, available, cfg,
+                                    doc.title,
+                                    reserved=set(pov_voices.values())):
+                console.print(f"  [green]cast from file:[/] {escape(note)}")
+
             console.print("[bold]cast[/]")
             for line in cast_obj.summary():
-                console.print(f"  [dim]{line}[/]")
+                console.print(f"  [dim]{escape(line)}[/]")
             unknown = [c.name for c in cast_obj.characters.values()
                        if not c.voice and not c.is_narrator]
             if unknown:
-                console.print(
-                    f"  [yellow]no voice (gender unknown), reading as the "
-                    f"narrator: {', '.join(sorted(unknown))}[/]")
-                console.print('  [dim]assign them under \[characters] in the '
-                              'cast file to give them their own voice[/]')
+                console.print(f"  [yellow]no voice (gender unknown), reading as "
+                              f"the narrator: {', '.join(sorted(unknown))}[/]")
+            attributed = sum(1 for x in sentences
+                             if x.role == "speech" and x.speaker)
+            total_speech = sum(1 for x in sentences if x.role == "speech")
+            if total_speech:
+                console.print(f"  [dim]{attributed}/{total_speech} spoken lines "
+                              f"attributed[/]\n")
+
             if args.cast_review:
                 write_review(args.cast_review, sentences, cast_obj, pov_voices)
                 console.print(f"[green]\u2713[/] wrote {args.cast_review}")
                 return 0
-            attributed = sum(1 for x in sentences if x.role == "speech" and x.speaker)
-            total_speech = sum(1 for x in sentences if x.role == "speech")
-            console.print(f"  [dim]{attributed}/{total_speech} spoken lines attributed[/]\n")
 
     if args.dry_run:
         # When casting, show the voice each line will actually be read in:
