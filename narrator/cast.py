@@ -261,9 +261,11 @@ def build_roster(sentences: list[Sentence], title: str,
 def attribute(sentences: list[Sentence], roster: dict[str, Character],
               title: str, cfg: DirectorConfig, on_progress=None) -> None:
     """Fill in Sentence.speaker for spoken lines, in place."""
-    speech_idx = [i for i, s in enumerate(sentences) if s.role == "speech"]
-    if not speech_idx:
+    if not any(s.role == "speech" for s in sentences):
         return
+    # Sentence.index is absolute within the document, so it is not a position
+    # in this list once a range has been selected with --from / --limit.
+    by_index = {s.index: s for s in sentences}
     names = ", ".join(c.name for c in roster.values()) or "(unknown)"
 
     ATTRIB_CACHE.mkdir(parents=True, exist_ok=True)
@@ -309,8 +311,9 @@ def attribute(sentences: list[Sentence], roster: dict[str, Character],
             except (TypeError, ValueError):
                 continue
             who = str(row.get("who", "")).strip()
-            if idx in want and who:
-                sentences[idx].speaker = who
+            target = by_index.get(idx)
+            if target is not None and idx in want and who:
+                target.speaker = who
         done += len(batch)
         if on_progress:
             on_progress(done, len(sentences))
@@ -328,14 +331,16 @@ def assign_voices(roster: dict[str, Character], narrator_voice: str,
     taken = {narrator_voice}
 
     def take(gender: str) -> str:
-        pools = ([MALE_POOL] if gender == "male"
-                 else [FEMALE_POOL] if gender == "female"
-                 else [MALE_POOL, FEMALE_POOL])
-        for pool in pools:
-            for v in pool:
-                if v in available and v not in taken:
-                    taken.add(v)
-                    return v
+        # An unknown gender gets no voice, deliberately. Guessing lands a
+        # British man on a character called Sophie, and a wrong voice is far
+        # more jarring than a character sharing the narrator's. Uncast
+        # speakers are reported so they can be assigned in the cast file.
+        pool = (MALE_POOL if gender == "male"
+                else FEMALE_POOL if gender == "female" else [])
+        for v in pool:
+            if v in available and v not in taken:
+                taken.add(v)
+                return v
         return ""
 
     # Narrators first, in the order they appear, so the primary POV keeps the
@@ -466,8 +471,7 @@ def ensure_cast(sentences: list[Sentence], cast: "Cast", available: set[str],
         display = next((s.speaker for s in sentences
                         if s.speaker.upper() == who), who)
         g = gender.get(who, "unknown")
-        pool = MALE_POOL if g == "male" else FEMALE_POOL if g == "female" else \
-            MALE_POOL + FEMALE_POOL
+        pool = MALE_POOL if g == "male" else FEMALE_POOL if g == "female" else []
         voice = next((v for v in pool if v in available and v not in used), "")
         cast.characters[who] = Character(name=display, gender=g, voice=voice)
         used.add(voice)

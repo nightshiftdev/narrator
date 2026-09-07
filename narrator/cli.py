@@ -221,6 +221,14 @@ def main(argv: list[str] | None = None) -> int:
             console.print("[bold]cast[/]")
             for line in cast_obj.summary():
                 console.print(f"  [dim]{line}[/]")
+            unknown = [c.name for c in cast_obj.characters.values()
+                       if not c.voice and not c.is_narrator]
+            if unknown:
+                console.print(
+                    f"  [yellow]no voice (gender unknown), reading as the "
+                    f"narrator: {', '.join(sorted(unknown))}[/]")
+                console.print('  [dim]assign them under \[characters] in the '
+                              'cast file to give them their own voice[/]')
             if args.cast_review:
                 write_review(args.cast_review, sentences, cast_obj, pov_voices)
                 console.print(f"[green]\u2713[/] wrote {args.cast_review}")

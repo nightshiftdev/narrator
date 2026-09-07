@@ -76,6 +76,22 @@ def extract_markdown(text: str, title_hint: str) -> Document:
             i += 1
             continue
 
+        # POV / scene marker: consecutive lines opening with "= ", as in
+        #     = JACK
+        #     = *March 2027*
+        # Read as one scene header rather than as prose, and the name is what
+        # tells the narrator whose section this is.
+        if re.match(r"^=\s+\S", stripped):
+            flush_para()
+            marker: list[str] = []
+            while i < n and re.match(r"^=\s+\S", lines[i].strip()):
+                marker.append(_md_inline(lines[i].strip()[1:].strip()))
+                i += 1
+            body = " ".join(x for x in marker if x)
+            if body:
+                blocks.append(Block("heading", body, level=3, index=len(blocks)))
+            continue
+
         # atx heading
         m = re.match(r"(#{1,6})\s+(.*)", stripped)
         if m:

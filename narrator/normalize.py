@@ -107,6 +107,21 @@ MAGNITUDE = {"k": "thousand", "m": "million", "b": "billion", "bn": "billion",
 # as "eye eye", because "ay" is /aɪ/ rather than /eɪ/.
 
 
+_SENTENCE_ENDS = re.compile(r"\s*(?:[\"\u201c\u2018(]?[A-Z]|$)")
+
+
+def _closing_stop(m: "re.Match") -> str:
+    """Keep a full stop that the a.m./p.m. pattern swallowed.
+
+    "at 2 a.m." ends a sentence; stripping the periods from the marker takes
+    the sentence's own full stop with them, and the line then runs into the
+    next one without a fall.
+    """
+    if not m.group(0).rstrip().endswith("."):
+        return ""
+    return "." if _SENTENCE_ENDS.match(m.string[m.end():]) else ""
+
+
 def normalise(text: str) -> str:
     s = text
 
@@ -146,13 +161,30 @@ def normalise(text: str) -> str:
                if len(m.group(2)) == 4 else f"{spell_year(int(m.group(1)))} to {spell_int(int(m.group(2)))}", s)
 
     # times
-    s = re.sub(r"\b(\d{1,2}):(\d{2})\s*(a\.?m\.?|p\.?m\.?)?",
+    def _time(m: re.Match) -> str:
+        h, mm, ampm = int(m.group(1)), m.group(2), m.group(3)
+        out = spell_int(h)
+        if mm != "00":
+            out += " " + ("oh " + spell_int(int(mm)) if int(mm) < 10
+                          else spell_int(int(mm)))
+        if ampm:
+            # "AM", never "A.M.": a period is a full stop to every engine, so
+            # the dotted form is read as "ay." [pause] "em." Capitals matter
+            # too - lowercase "am" is phonemised as the verb.
+            out += " " + ampm.replace(".", "").upper() + _closing_stop(m)
+        return out
+
+    # The am/pm marker and the space before it are optional *together*, so
+    # "4:17 in the morning" keeps the space that "in" needs.
+    s = re.sub(r"\b(\d{1,2}):(\d{2})(?:\s*(a\.?m\.?|p\.?m\.?))?",
+               _time, s, flags=re.I)
+    # "2AM", "7 p.m." - an hour with a marker but no minutes
+    s = re.sub(r"\b(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)(?![a-z])",
                lambda m: f"{spell_int(int(m.group(1)))} "
-                         + ("" if m.group(2) == "00" else
-                            ("oh " + spell_int(int(m.group(2))) if int(m.group(2)) < 10
-                             else spell_int(int(m.group(2)))))
-                         + (" " + m.group(3).replace(".", "").upper()[0] + "." + m.group(3).replace(".", "").upper()[1] + "." if m.group(3) else ""),
+                         f"{m.group(2).replace('.', '').upper()}{_closing_stop(m)}",
                s, flags=re.I)
+    # any surviving standalone marker
+    s = re.sub(r"\b([ap])\.m\.", lambda m: m.group(1).upper() + "M", s, flags=re.I)
 
     # ordinals: 21st, 3rd
     s = re.sub(r"\b(\d+)(st|nd|rd|th)\b", lambda m: spell_ordinal(int(m.group(1))), s)
