@@ -167,6 +167,14 @@ def to_m4b(wav: Path, out: Path, *, bitrate: int = 64_000,
 
     if chapters:
         _write_chapter_sidecar(out.with_suffix(".chapters.txt"), chapters)
+        # afconvert writes no chapter atoms, so add them afterwards: a
+        # QuickTime chapter track for Apple Books, and a Nero chpl for
+        # everything else.
+        try:
+            from .mp4chapters import embed
+            embed(out, chapters)
+        except Exception:
+            pass          # the audio is fine; only navigation is lost
     return out
 
 
