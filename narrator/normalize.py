@@ -183,8 +183,12 @@ def normalise(text: str) -> str:
                lambda m: f"{spell_int(int(m.group(1)))} "
                          f"{m.group(2).replace('.', '').upper()}{_closing_stop(m)}",
                s, flags=re.I)
-    # any surviving standalone marker
-    s = re.sub(r"\b([ap])\.m\.", lambda m: m.group(1).upper() + "M", s, flags=re.I)
+    # Any surviving standalone marker, including after a spelled-out hour
+    # ("around two a.m. Not I should have..."), which the numeric rules above
+    # never see. The sentence's own full stop has to survive the strip.
+    s = re.sub(r"\b([ap])\.\s?m\.",
+               lambda m: m.group(1).upper() + "M" + _closing_stop(m),
+               s, flags=re.I)
 
     # ordinals: 21st, 3rd
     s = re.sub(r"\b(\d+)(st|nd|rd|th)\b", lambda m: spell_ordinal(int(m.group(1))), s)
