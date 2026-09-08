@@ -68,22 +68,29 @@ VOICE_STATS: dict[str, tuple[float, float]] = {
 # same person. (pitch, animation)
 EMOTION_STYLE: dict[str, tuple[float, float]] = {
     "neutral":       (0.00,  0.00),
-    "warm":          (0.02,  0.05),
-    "curious":       (0.05,  0.08),
-    "excited":       (0.10,  0.14),
-    "urgent":        (0.08,  0.12),
-    "tense":         (0.04,  0.08),
-    "wry":           (0.03,  0.06),
-    "authoritative": (-0.04, 0.02),
-    "reflective":    (-0.05, 0.02),
-    "tender":        (-0.03, -0.01),
-    "somber":        (-0.10, -0.04),
-    "ominous":       (-0.14, -0.02),
+    "warm":          (0.015, 0.035),
+    "curious":       (0.035, 0.055),
+    "excited":       (0.065, 0.095),
+    "urgent":        (0.055, 0.080),
+    "tense":         (0.030, 0.055),
+    "wry":           (0.020, 0.040),
+    "authoritative": (-0.025, 0.015),
+    "reflective":    (-0.035, 0.015),
+    "tender":        (-0.020, -0.010),
+    "somber":        (-0.060, -0.025),
+    "ominous":       (-0.080, -0.015),
 }
+
+# The offsets above are deliberately small. Stepping along these axes moves
+# the style vector away from anything the model was trained on, and the voice
+# gets rough as it goes: measured over one chapter, jitter tracked offset size
+# almost exactly, and the largest offsets produced an audible resonance that a
+# listener reported as a bug. Roughly two thirds of the original values keeps
+# the emotional range while bringing jitter back to the neutral baseline.
 
 # Spoken lines sit slightly forward of the narration around them: a shade
 # brighter and more animated, the way a reader lifts into a character.
-SPEECH_LIFT = (0.05, 0.07)
+SPEECH_LIFT = (0.035, 0.05)
 
 
 # Voices worth using for long-form narration, best first.
@@ -131,6 +138,8 @@ class KokoroEngine(Engine):
         self.base_speed = speed
         self._pitch_axis, self._anim_axis = self._build_axes()
         self._style_cache: dict[tuple, np.ndarray] = {}
+        self.retries = 0
+        self.rough_saved = 0.0
         # Casting: a per-character voice map, and a narrating voice per
         # point-of-view section for books that change narrator.
         self.cast = cast
@@ -273,9 +282,39 @@ class KokoroEngine(Engine):
         # "timing" director profile.
         return text
 
+    # Above this, a clip is rough enough to be heard as a defect rather than
+    # as a voice. Measured across a chapter, a clean line sits near 4-5%.
+    ROUGH = 8.0
+
     def synth(self, sentence: Sentence) -> Clip:
+        clip = self._synth_at(sentence, 1.0)
+        if not len(clip.samples):
+            return clip
+        from .. import audio as A
+        rough = A.jitter(clip.samples, clip.rate)
+        if rough <= self.ROUGH:
+            return clip
+        # Kokoro's roughness is not a property of the text: nudging the rate
+        # by a few percent re-rolls the generation, and one of the takes is
+        # usually clean. The change in pace is far below what a listener can
+        # detect; the change in roughness is not.
+        best, best_rough = clip, rough
+        for nudge in (1.04, 0.96):
+            alt = self._synth_at(sentence, nudge)
+            if not len(alt.samples):
+                continue
+            alt_rough = A.jitter(alt.samples, alt.rate)
+            if alt_rough < best_rough:
+                best, best_rough = alt, alt_rough
+            if best_rough <= self.ROUGH:
+                break
+        self.retries += 1
+        self.rough_saved += rough - best_rough
+        return best
+
+    def _synth_at(self, sentence: Sentence, nudge: float) -> Clip:
         text = self._shape(sentence)
-        speed = float(np.clip(self.base_speed * sentence.pace, 0.6, 1.6))
+        speed = float(np.clip(self.base_speed * sentence.pace * nudge, 0.6, 1.6))
         voice = (self.dialogue_voice if sentence.role == "speech"
                  and self.dialogue_voice else self._style_for(sentence))
         try:

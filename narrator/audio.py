@@ -187,3 +187,42 @@ def _write_chapter_sidecar(path: Path, chapters: list[tuple[str, float]]) -> Non
         ms = int((start - int(start)) * 1000)
         lines.append(f"{h:02d}:{m:02d}:{s:02d}.{ms:03d} {title}")
     path.write_text("\n".join(lines) + "\n")
+
+
+def jitter(x: np.ndarray, rate: int) -> float:
+    """Cycle-to-cycle pitch instability, as a percentage.
+
+    This is the standard measure of a rough voice, and it is what a listener
+    hears as a "vibration" or "resonance" in a synthesised line. Kokoro
+    produces it unpredictably: the same voice reading the same paragraph is
+    clean in one sentence and rough in the next, and nothing in the text
+    predicts which.
+
+    Autocorrelation via FFT, so it costs little enough to run on every clip.
+    """
+    if len(x) < rate // 8:
+        return 0.0
+    win, hop = int(0.04 * rate), int(0.01 * rate)
+    lo, hi = int(rate / 350), int(rate / 60)
+    n = 1 << (2 * win - 1).bit_length()
+    f0 = []
+    for i in range(0, len(x) - win, hop):
+        w = x[i:i + win]
+        if np.sqrt((w ** 2).mean()) < 0.02:
+            continue
+        w = w - w.mean()
+        spec = np.fft.rfft(w, n)
+        ac = np.fft.irfft(spec * np.conj(spec), n)[:win]
+        if ac[0] <= 0:
+            continue
+        seg = ac[lo:hi]
+        if not len(seg):
+            continue
+        peak = int(np.argmax(seg)) + lo
+        if ac[peak] / ac[0] < 0.3:
+            continue
+        f0.append(rate / peak)
+    if len(f0) < 3:
+        return 0.0
+    f0 = np.asarray(f0)
+    return float(np.mean(np.abs(np.diff(f0))) / np.mean(f0) * 100)
