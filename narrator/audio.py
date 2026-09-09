@@ -259,3 +259,35 @@ def jitter(x: np.ndarray, rate: int) -> float:
         return 0.0
     f0 = np.asarray(f0)
     return float(np.mean(np.abs(np.diff(f0))) / np.mean(f0) * 100)
+
+
+def first_gap(x: np.ndarray, rate: int, lo: float, hi: float,
+              min_silence: float = 0.05) -> int | None:
+    """First real silence between `lo` and `hi` seconds, or None.
+
+    Used to cut a short line away from the carrier phrase spoken after it.
+    A run this long is a pause between sentences rather than a stop consonant
+    inside a word, which is the distinction that matters: cutting inside a
+    word is worse than not cutting at all.
+    """
+    win = max(1, int(0.01 * rate))
+    frames = len(x) // win
+    if frames < 4:
+        return None
+    env = np.abs(x[:frames * win]).reshape(-1, win).max(axis=1)
+    quiet = env < max(0.012, float(env.max()) * 0.05)
+    a = max(1, int(lo / 0.01))
+    b = min(frames, int(hi / 0.01))
+    need = max(2, int(min_silence / 0.01))
+    run = 0
+    start = 0
+    for i in range(a, b):
+        if quiet[i]:
+            if run == 0:
+                start = i
+            run += 1
+            if run >= need:
+                return int((start + 2) * win)
+        else:
+            run = 0
+    return None

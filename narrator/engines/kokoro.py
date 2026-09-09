@@ -285,8 +285,16 @@ class KokoroEngine(Engine):
     # Above this, a clip is rough enough to be heard as a defect rather than
     # as a voice. Measured across a chapter, a clean line sits near 4-5%.
     ROUGH = 8.0
+    # At or below this many words, an utterance is mostly its own ending.
+    SHORT_WORDS = 3
+    # Spoken after a short line so the lengthening lands on words we discard.
+    CARRIER = "He said nothing more."
 
     def synth(self, sentence: Sentence) -> Clip:
+        if len(sentence.text.split()) <= self.SHORT_WORDS:
+            carried = self._synth_short(sentence)
+            if carried is not None:
+                return carried
         clip = self._synth_at(sentence, 1.0)
         if not len(clip.samples):
             return clip
@@ -311,6 +319,40 @@ class KokoroEngine(Engine):
         self.retries += 1
         self.rough_saved += rough - best_rough
         return best
+
+    def _synth_short(self, sentence: Sentence) -> "Clip | None":
+        """Speak a very short line without the drawl it gets on its own.
+
+        The model lengthens the end of an utterance, and a one-word line is
+        nothing but its end: "No." runs at 1.46 words per second against 2.76
+        for prose, which a listener hears as an awkward drag. Speaking it as
+        the first sentence of a longer one puts the lengthening on words that
+        are then discarded, and the line comes back at conversational speed.
+
+        The cut is only taken when a real silence is found where the boundary
+        must be; otherwise the plain rendering stands, because a cut in the
+        wrong place clips a word and that is far worse than a slow one.
+        """
+        from .. import audio as A
+
+        plain = self._synth_at(sentence, 1.0)
+        if not len(plain.samples):
+            return None
+        alone = plain.duration
+        carried = Sentence(
+            f"{sentence.text.rstrip()} {self.CARRIER}", sentence.block_index,
+            sentence.kind, emotion=sentence.emotion, pace=sentence.pace,
+            pause_after=sentence.pause_after, role=sentence.role,
+            speaker=sentence.speaker, pov=sentence.pov,
+        )
+        long = self._synth_at(carried, 1.0)
+        if not len(long.samples):
+            return None
+        cut = A.first_gap(long.samples, long.rate,
+                          lo=0.30 * alone, hi=1.30 * alone)
+        if cut is None:
+            return None
+        return Clip(np.ascontiguousarray(long.samples[:cut]), long.rate)
 
     def _synth_at(self, sentence: Sentence, nudge: float) -> Clip:
         text = self._shape(sentence)
