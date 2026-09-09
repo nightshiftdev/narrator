@@ -285,17 +285,30 @@ class KokoroEngine(Engine):
     # Above this, a clip is rough enough to be heard as a defect rather than
     # as a voice. Measured across a chapter, a clean line sits near 4-5%.
     ROUGH = 8.0
-    # At or below this many words, an utterance is mostly its own ending.
-    SHORT_WORDS = 3
+    # Speaking rate, in words per second, measured on ordinary prose from
+    # this book. A line that comes out far below this is being drawled.
+    TARGET_WPS = 2.75
+    SLOW_WPS = 2.35          # below this, try the carrier
+    FAST_WPS = 3.30          # above this, the carrier has overshot
+    # Only lines this short can be drawled enough to be worth the attempt.
+    SHORT_WORDS = 6
     # Spoken after a short line so the lengthening lands on words we discard.
     CARRIER = "He said nothing more."
 
     def synth(self, sentence: Sentence) -> Clip:
-        if len(sentence.text.split()) <= self.SHORT_WORDS:
-            carried = self._synth_short(sentence)
-            if carried is not None:
-                return carried
-        clip = self._synth_at(sentence, 1.0)
+        words = len(sentence.text.split())
+        if words <= self.SHORT_WORDS:
+            plain = self._synth_at(sentence, 1.0)
+            if len(plain.samples):
+                rate = words / plain.duration
+                if rate < self.SLOW_WPS:
+                    carried = self._synth_short(sentence, plain)
+                    if carried is not None:
+                        return carried
+                return self._maybe_retry(plain, sentence)
+        return self._maybe_retry(self._synth_at(sentence, 1.0), sentence)
+
+    def _maybe_retry(self, clip: Clip, sentence: Sentence) -> Clip:
         if not len(clip.samples):
             return clip
         from .. import audio as A
@@ -320,7 +333,8 @@ class KokoroEngine(Engine):
         self.rough_saved += rough - best_rough
         return best
 
-    def _synth_short(self, sentence: Sentence) -> "Clip | None":
+    def _synth_short(self, sentence: Sentence,
+                     plain: "Clip | None" = None) -> "Clip | None":
         """Speak a very short line without the drawl it gets on its own.
 
         The model lengthens the end of an utterance, and a one-word line is
@@ -335,10 +349,12 @@ class KokoroEngine(Engine):
         """
         from .. import audio as A
 
-        plain = self._synth_at(sentence, 1.0)
+        if plain is None:
+            plain = self._synth_at(sentence, 1.0)
         if not len(plain.samples):
             return None
         alone = plain.duration
+        words = len(sentence.text.split())
         carried = Sentence(
             f"{sentence.text.rstrip()} {self.CARRIER}", sentence.block_index,
             sentence.kind, emotion=sentence.emotion, pace=sentence.pace,
@@ -352,7 +368,33 @@ class KokoroEngine(Engine):
                           lo=0.30 * alone, hi=1.30 * alone)
         if cut is None:
             return None
-        return Clip(np.ascontiguousarray(long.samples[:cut]), long.rate)
+        out = Clip(np.ascontiguousarray(long.samples[:cut]), long.rate)
+        if not out.duration:
+            return None
+        rate = words / out.duration
+
+        # Cutting the drawl off a short line often leaves it faster than any
+        # human would say it. The carrier is still the right rendering -- it
+        # has the prosody of a line that continues rather than one that ends
+        # -- so it is spoken again more slowly to land on conversational
+        # speed, instead of being thrown away.
+        if rate > self.FAST_WPS:
+            nudge = max(0.6, min(1.0, self.TARGET_WPS / rate))
+            slower = self._synth_at(carried, nudge)
+            if len(slower.samples):
+                cut2 = A.first_gap(slower.samples, slower.rate,
+                                   lo=0.30 * alone, hi=1.60 * alone / nudge)
+                if cut2:
+                    alt = Clip(np.ascontiguousarray(slower.samples[:cut2]),
+                               slower.rate)
+                    if alt.duration and words / alt.duration <= self.FAST_WPS:
+                        out, rate = alt, words / alt.duration
+
+        if rate > self.FAST_WPS:
+            return None
+        if abs(rate - self.TARGET_WPS) >= abs(words / alone - self.TARGET_WPS):
+            return None
+        return out
 
     def _synth_at(self, sentence: Sentence, nudge: float) -> Clip:
         text = self._shape(sentence)
