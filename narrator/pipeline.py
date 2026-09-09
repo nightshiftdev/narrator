@@ -54,10 +54,11 @@ def group_for_synthesis(sentences: list[Sentence], max_words: int = 9,
             and cur[-1].speaker == s.speaker
             and cur[-1].role == s.role
             and cur[-1].pov == s.pov
-            and cur[-1].kind == s.kind
-            and cur[-1].kind not in ("title","chapter","heading")
+            # headings join headings, prose joins prose, never across
+            and ((cur[-1].kind in ("title", "chapter", "heading"))
+                 == (s.kind in ("title", "chapter", "heading")))
             and not cur[-1].scene_break
-            and cur[-1].pause_after <= 0.5
+            and cur[-1].pause_after <= 1.5
         )
         if joinable:
             cur.append(s)
@@ -65,7 +66,7 @@ def group_for_synthesis(sentences: list[Sentence], max_words: int = 9,
         if cur:
             groups.append(cur)
             cur = []
-        if short and s.kind not in ("title","chapter","heading"):
+        if short:
             cur = [s]
         else:
             groups.append([s])
@@ -79,7 +80,21 @@ def merge_group(group: list[Sentence]) -> Sentence:
     if len(group) == 1:
         return group[0]
     head = group[0]
-    text = " ".join(x.text.rstrip() for x in group)
+    # Headings run together as one announcement, separated by full stops.
+    if head.kind in ("title", "chapter", "heading"):
+        # "Chapter 3. Adam" followed by the POV marker "ADAM" would say the
+        # name twice; the second is the same announcement, not a new one.
+        parts: list[str] = []
+        for x in group:
+            piece = x.text.rstrip().rstrip(".")
+            if not piece:
+                continue
+            if parts and piece.lower() in parts[-1].lower():
+                continue
+            parts.append(piece)
+        text = ". ".join(parts) + "."
+    else:
+        text = " ".join(x.text.rstrip() for x in group)
     merged = Sentence(
         text, head.block_index, head.kind, index=head.index,
         emotion=head.emotion,

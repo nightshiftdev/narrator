@@ -44,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cast-review", type=Path, default=None,
                    help="write an editable cast file describing what was "
                         "inferred, then stop")
+    p.add_argument("--author", default="", help="author, written into the file")
+    p.add_argument("--cover", type=Path, default=None,
+                   help="cover image (png/jpg) to embed")
+    p.add_argument("--title", default="", help="title; defaults to the document's")
     p.add_argument("-o", "--out", type=Path, default=None,
                    help="write audio here (.m4b, .wav); default: alongside the source")
     p.add_argument("--no-play", action="store_true", help="render only, don't play")
@@ -328,7 +332,9 @@ def main(argv: list[str] | None = None) -> int:
         A.write_wav(wav, result.samples, result.rate)
         if out.suffix.lower() in (".m4b", ".m4a"):
             try:
-                A.to_m4b(wav, out, chapters=result.chapters, title=doc.title)
+                A.to_m4b(wav, out, chapters=result.chapters,
+                         title=args.title or doc.title,
+                         author=args.author, cover=args.cover)
                 wav.unlink(missing_ok=True)
             except Exception as exc:
                 console.print(f"[yellow]m4b encode failed ({exc}); kept {wav}[/]")

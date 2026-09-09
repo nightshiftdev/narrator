@@ -390,6 +390,13 @@ def direct(
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         _direct_batches(sentences, title, cfg, on_progress)
 
+    # A heading should be deliberate, not slow. Kokoro already stretches a
+    # short utterance; directing it slower on top of that is what a reader
+    # described as "slow motion".
+    for s_ in sentences:
+        if s_.kind in ("title", "chapter", "heading"):
+            s_.pace = max(s_.pace, 1.12)
+
     _shape_dialogue(sentences)
 
     # A scene break is structural: the director may not shorten it.
